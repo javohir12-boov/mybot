@@ -2115,12 +2115,12 @@ async def _submit_premium_request(
         trimmed = note if len(note) <= 1200 else (note[:1200] + '...')
         caption += f"Receipt note: {trimmed}\n"
 
-    kb = InlineKeyboardBuilder()
-    kb.button(text=t('uz', 'btn_premium_approve'), callback_data=f"prem_ok:{rid}")
-    kb.button(text=t('uz', 'btn_premium_reject'), callback_data=f"prem_no:{rid}")
-    kb.adjust(2)
-
     for admin_id in ADMIN_IDS:
+        admin_lang = await _get_ui_lang(int(admin_id))
+        kb = InlineKeyboardBuilder()
+        kb.button(text=t(admin_lang, 'btn_premium_approve'), callback_data=f"prem_ok:{rid}")
+        kb.button(text=t(admin_lang, 'btn_premium_reject'), callback_data=f"prem_no:{rid}")
+        kb.adjust(2)
         try:
             if file_type == 'photo':
                 await bot.send_photo(admin_id, file_id, caption=caption, reply_markup=kb.as_markup())

@@ -97,6 +97,51 @@ async def _run_health_server(*, host: str, port: int) -> object:
     logging.info('Health server started on %s:%s', host, port)
     return runner
 
+def _pick_keepalive_url() -> str:
+    """Best-effort URL to ping periodically to reduce Render idling."""
+
+    url = str(os.getenv('KEEPALIVE_URL', '') or '').strip()
+    if not url:
+        url = str(WEBHOOK_URL or '').strip()
+    if not url:
+        url = str(os.getenv('RENDER_EXTERNAL_URL', '') or '').strip()
+
+    url = url.strip().rstrip('/')
+
+    # If we have an external URL, prefer pinging it (counts as an incoming request).
+    if url:
+        if not (url.startswith('http://') or url.startswith('https://')):
+            url = 'https://' + url
+        return url + '/healthz'
+
+    # Fallback: local ping.
+    return f"http://127.0.0.1:{int(WEB_SERVER_PORT or 8080)}/healthz"
+
+
+async def _keepalive_loop(url: str, *, interval_sec: int = 840) -> None:
+    """Ping a URL periodically. Interval default is 14 minutes."""
+
+    try:
+        import aiohttp
+    except Exception:
+        return
+
+    interval_sec = int(interval_sec or 840)
+    interval_sec = max(60, min(3600, interval_sec))
+
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        # Initial small delay to avoid slowing down startup.
+        await asyncio.sleep(5)
+        while True:
+            try:
+                async with session.get(str(url), allow_redirects=True) as resp:
+                    # Consume body to reuse connection.
+                    await resp.text()
+                logging.debug('keepalive ok: %s', url)
+            except Exception as exc:
+                logging.debug('keepalive failed: %s', exc)
+            await asyncio.sleep(interval_sec)
 
 async def _run_polling(bot: Bot, dp: Dispatcher) -> None:
     logging.info("Bot started (polling)")
@@ -178,12 +223,44 @@ async def main() -> None:
             logging.warning('Health server start failed: %s', exc)
             health_runner = None
 
+    keepalive_task = None
+    try:
+        auto_on = bool(
+            str(os.getenv('RENDER_EXTERNAL_URL') or '').strip()
+            or str(os.getenv('PORT') or '').strip()
+            or str(WEBHOOK_URL or '').strip()
+            or str(os.getenv('KEEPALIVE_URL') or '').strip()
+        )
+        raw = str(os.getenv('KEEPALIVE_ENABLED', '') or '').strip().lower()
+        if raw in {'0', 'false', 'no', 'off'}:
+            enabled = False
+        elif raw in {'1', 'true', 'yes', 'on'}:
+            enabled = True
+        else:
+            enabled = auto_on
+
+        if enabled:
+            url = _pick_keepalive_url()
+            interval = int(os.getenv('KEEPALIVE_INTERVAL_SEC', '840') or 840)
+            keepalive_task = asyncio.create_task(_keepalive_loop(url, interval_sec=interval))
+            logging.info('Keepalive enabled (every %ss): %s', interval, url)
+    except Exception as exc:
+        logging.warning('Keepalive setup failed: %s', exc)
     try:
         if str(WEBHOOK_URL or '').strip():
             await _run_webhook(bot, dp)
         else:
             await _run_polling(bot, dp)
     finally:
+        if keepalive_task is not None:
+            keepalive_task.cancel()
+            try:
+                await keepalive_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
         if health_runner is not None:
             try:
                 await health_runner.cleanup()
@@ -196,3 +273,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Bot to'xtatildi")
+

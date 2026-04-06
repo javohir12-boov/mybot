@@ -25,6 +25,14 @@ def main() -> int:
     try:
         models = list(genai.list_models())
     except Exception as exc:
+        msg = str(exc)
+        low = msg.lower()
+        if "reported as leaked" in low or ("leaked" in low and "api key" in low):
+            print(
+                "ListModels failed: Gemini 403: this API key was reported as leaked. "
+                "Create a new Gemini API key and replace GEMINI_API_KEY in .env."
+            )
+            return 1
         print(f"ListModels failed: {exc}")
         return 1
 

@@ -29,6 +29,34 @@ def _looks_like_gemini_key(key: Optional[str]) -> bool:
     k = (key or "").strip()
     return k.startswith("AIza")
 
+
+def _looks_like_gemini_leaked_key_error(err_text: str) -> bool:
+    low = (err_text or "").lower()
+    return "reported as leaked" in low or ("leaked" in low and "api key" in low)
+
+
+def _looks_like_gemini_auth_error(err_text: str) -> bool:
+    low = (err_text or "").lower()
+    return (
+        "api key" in low
+        or "403" in low
+        or "401" in low
+        or "permission" in low
+        or "unauthorized" in low
+        or "forbidden" in low
+    )
+
+
+def _format_gemini_auth_error(err_text: str) -> str:
+    if _looks_like_gemini_leaked_key_error(err_text):
+        return (
+            "Gemini 403: bu API key Google tomonidan leaked deb belgilangan va bloklangan.\n"
+            "Yechim: yangi Gemini API key yarating, `.env` dagi `GEMINI_API_KEY` ni almashtiring va botni qayta ishga tushiring.\n"
+            "Agar OpenAI ishlatmasangiz, `.env` dagi `OPENAI_API_KEY` ni olib tashlang."
+        )
+    return "Gemini API key noto'g'ri yoki ruxsat yo'q. `.env` dagi `GEMINI_API_KEY` ni tekshiring."
+
+
 def _gemini_retry_after_seconds(err_text: str) -> Optional[int]:
     low = (err_text or "").lower()
     # Example: "Please retry in 41.8055s."
@@ -944,6 +972,8 @@ class AIService:
                 msg = str(exc)
                 if _looks_like_gemini_quota_error(msg):
                     raise AIServiceError(_format_gemini_quota_error(msg, model_name=model_name)) from exc
+                if _looks_like_gemini_auth_error(msg):
+                    raise AIServiceError(_format_gemini_auth_error(msg)) from exc
                 if _looks_like_deadline_exceeded(msg):
                     raise AIServiceError(
                         _format_deadline_error(msg, provider="gemini", model_name=str(model_name), timeout_sec=int(timeout_sec))
@@ -1038,6 +1068,8 @@ class AIService:
             msg = str(exc)
             if _looks_like_gemini_quota_error(msg):
                 raise AIServiceError(_format_gemini_quota_error(msg, model_name=model_name)) from exc
+            if _looks_like_gemini_auth_error(msg):
+                raise AIServiceError(_format_gemini_auth_error(msg)) from exc
             if _looks_like_deadline_exceeded(msg):
                 raise AIServiceError(
                     _format_deadline_error(msg, provider="gemini", model_name=str(model_name), timeout_sec=int(timeout_sec))
@@ -1276,10 +1308,8 @@ class AIService:
                         "Yechim: `.env` da `GEMINI_MODEL` ni mavjud modelga almashtiring.\n"
                         "Model ro'yxatini ko'rish: `python scripts\\list_gemini_models.py`"
                     ) from exc
-                if "api key" in low or "403" in low or "401" in low or "permission" in low:
-                    raise AIServiceError(
-                        "Gemini API key noto'g'ri yoki ruxsat yo'q. `.env` dagi `GEMINI_API_KEY` ni tekshiring."
-                    ) from exc
+                if _looks_like_gemini_auth_error(msg):
+                    raise AIServiceError(_format_gemini_auth_error(msg)) from exc
                 raise
 
         max_retries = int(os.getenv("GEMINI_RETRY_MAX", "1") or 1)
@@ -1394,10 +1424,8 @@ class AIService:
                         "Yechim: `.env` da `GEMINI_MODEL` ni mavjud modelga almashtiring.\n"
                         "Model ro'yxatini ko'rish: `python scripts\\list_gemini_models.py`"
                     ) from exc
-                if "api key" in low or "403" in low or "401" in low or "permission" in low:
-                    raise AIServiceError(
-                        "Gemini API key noto'g'ri yoki ruxsat yo'q. `.env` dagi `GEMINI_API_KEY` ni tekshiring."
-                    ) from exc
+                if _looks_like_gemini_auth_error(msg):
+                    raise AIServiceError(_format_gemini_auth_error(msg)) from exc
                 raise
 
         max_retries = int(os.getenv("GEMINI_RETRY_MAX", "1") or 1)
@@ -1530,10 +1558,8 @@ class AIService:
                         "Yechim: `.env` da `GEMINI_MODEL` ni mavjud modelga almashtiring.\n"
                         "Model ro'yxatini ko'rish: `python scripts\\list_gemini_models.py`"
                     ) from exc
-                if "api key" in low or "403" in low or "401" in low or "permission" in low:
-                    raise AIServiceError(
-                        "Gemini API key noto'g'ri yoki ruxsat yo'q. `.env` dagi `GEMINI_API_KEY` ni tekshiring."
-                    ) from exc
+                if _looks_like_gemini_auth_error(msg):
+                    raise AIServiceError(_format_gemini_auth_error(msg)) from exc
                 if _looks_like_gemini_quota_error(msg):
                     delay = _gemini_retry_after_seconds(msg)
                     is_daily = _looks_like_gemini_daily_quota(msg)

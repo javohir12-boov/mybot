@@ -1,4 +1,4 @@
-import json
+﻿import json
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,29 +9,33 @@ class ImportServiceError(RuntimeError):
 
 
 _Q_START_RE = re.compile(r"^\s*(?:Q(?:uestion)?\s*)?(\d{1,3})\s*[).:\-]\s*(.+?)\s*$", re.IGNORECASE)
-_OPT_RE = re.compile(r"^\s*(?:[-•●]\s*)?([A-Da-dАВСДа-всд])\s*[).:\-]\s*(.+?)\s*$")
+_OPT_RE = re.compile(r"^\s*(?:[-*\u2022\u25CF\u25E6\u2013\u2014]\s*)?([A-Da-d\u0410\u0430\u0411\u0431\u0412\u0432\u0413\u0433\u0421\u0441\u0414\u0434])\s*[\).:\-\u2013\u2014]\s*(.+?)\s*$", re.IGNORECASE)
 _ANSWER_RE = re.compile(
-    r"^\s*(?:answer|ans|javob|to'g'ri\s*j?avob|correct(?:\s*answer)?|ответ|правильн(?:ый|ая)\s*ответ)\s*(?:[:\-=]|\s)\s*([A-Da-dАВСДа-всд]|[1-4])\b.*$",
+    r"^\s*(?:answer|ans|javob|to'g'ri\s*j?avob|correct(?:\s*answer)?|\u043E\u0442\u0432\u0435\u0442|\u043F\u0440\u0430\u0432\u0438\u043B\u044C\u043D(?:\u044B\u0439|\u0430\u044F|\u043E\u0435|\u044B\u0435)?\s*\u043E\u0442\u0432\u0435\u0442)\s*(?:[:\-=]|\s)\s*([A-Da-d\u0410\u0430\u0411\u0431\u0412\u0432\u0413\u0433\u0421\u0441\u0414\u0434]|[1-4])\b.*$",
     re.IGNORECASE,
 )
 _EXPL_RE = re.compile(r"^\s*(?:explanation|izoh)\s*[:\-]\s*(.+?)\s*$", re.IGNORECASE)
 
-_ANSWER_SECTION_RE = re.compile(r"(?i)^\s*(?:answers?|answer\s*key|javoblar|javoblari|kalit|ответы)\b")
-_ANSWER_PAIR_RE = re.compile(r"(?i)\b(\d{1,3})\s*[).:\-]\s*([A-Da-dАВСДа-всд]|[1-4])\b")
-_ANSWER_PAIR_COMPACT_RE = re.compile(r"(?i)\b(\d{1,3})\s*([A-Da-dАВСДа-всд])\b")
+_ANSWER_SECTION_RE = re.compile(r"(?i)^\s*(?:answers|answer\s*key|javoblar|javoblari|kalit|\u043E\u0442\u0432\u0435\u0442\u044B)\b")
+_ANSWER_PAIR_RE = re.compile(r"(?i)\b(\d{1,3})\s*[\).:\-]\s*([A-Da-d\u0410\u0430\u0411\u0431\u0412\u0432\u0413\u0433\u0421\u0441\u0414\u0434]|[1-4])\b")
+_ANSWER_PAIR_COMPACT_RE = re.compile(r"(?i)\b(\d{1,3})\s*([A-Da-d\u0410\u0430\u0411\u0431\u0412\u0432\u0413\u0433\u0421\u0441\u0414\u0434])\b")
 
 _CYR_MAP = {
-    "А": "A",
-    "В": "B",
-    "С": "C",
-    "Д": "D",
-    "а": "A",
-    "в": "B",
-    "с": "C",
-    "д": "D",
+    "\u0410": "A",
+    "\u0430": "A",
+    "\u0411": "B",
+    "\u0431": "B",
+    # Russian option labels: А, Б, В, Г correspond to A, B, C, D.
+    "\u0412": "C",
+    "\u0432": "C",
+    "\u0413": "D",
+    "\u0433": "D",
+    # Sometimes C/D are written with similar-looking Cyrillic letters.
+    "\u0421": "C",
+    "\u0441": "C",
+    "\u0414": "D",
+    "\u0434": "D",
 }
-
-
 def _answer_to_index(token: str) -> Optional[int]:
     t = (token or "").strip()
     if not t:
@@ -72,8 +76,8 @@ def _strip_correct_marker(text: str) -> tuple[str, bool]:
         return v, False
 
     marked = False
-    # Leading markers: "*", "✔", "✅"
-    while v and v[0] in {"*", "✔", "✅", "✓"}:
+    # Leading markers: "*", "вњ”", "вњ…"
+    while v and v[0] in {"*", "вњ”", "вњ…", "вњ“"}:
         marked = True
         v = v[1:].lstrip()
     # Trailing marker: "*"
@@ -82,9 +86,9 @@ def _strip_correct_marker(text: str) -> tuple[str, bool]:
         v = v[:-1].rstrip()
 
     # Parenthetical words (keep it conservative).
-    if re.search(r"(?i)\b(correct|to['’]g['’]ri|правильн)\b", v):
+    if re.search(r"(?i)\b(correct|to['’]g['’]ri|РїСЂР°РІРёР»СЊРЅ)\b", v):
         marked = True
-        v = re.sub(r"(?i)\b(correct|to['’]g['’]ri|правильн(?:ый|ая)?)\b", "", v).strip(" -:()")
+        v = re.sub(r"(?i)\b(correct|to['’]g['’]ri|РїСЂР°РІРёР»СЊРЅ(?:С‹Р№|Р°СЏ)?)\b", "", v).strip(" -:()")
 
     return v, marked
 
@@ -376,3 +380,6 @@ def import_format_example() -> str:
         "1 - B\n"
         "2 - 1"
     )
+
+
+

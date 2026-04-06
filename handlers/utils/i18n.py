@@ -76,6 +76,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         'btn_start_group': 'Guruhda boshlash',
         'btn_stats': '📊 Statistika',
         'btn_edit_quiz': 'Tahrirlash',
+        'btn_export_docx': 'Test fayli (.docx)',
         'btn_edit_title': 'Nomini tahrirlash',
         'btn_edit_time': 'Vaqtni tahrirlash',
         'btn_back': 'Orqaga',
@@ -133,6 +134,11 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         'bot_username_missing': 'Bot username topilmadi.',
         'share_link': 'Ulashish linki:\n{link}',
         'group_start_link': 'Guruhda boshlash uchun link:\n{link}',
+        'export_working': 'Test fayli tayyorlanmoqda...',
+        'export_failed': 'Fayl yaratib bo\'lmadi: {err}',
+        'export_docx_caption': 'Test fayli (.docx): {title}\\nID: {id}\\nJavoblar oxirida.',
+        'export_answer_key_title': 'Javoblar kaliti',
+        'export_sent_private_notice': 'Test fayli shaxsiy chatga yuborildi.',
         'manual_title_prompt': 'Yangi test nomini kiriting:',
         'manual_title_required': 'Test nomini kiriting:',
         'manual_first_question': "1-savolni yuboring.\n- Matn yozishingiz mumkin\n- Yoki savol rasmini yuborishingiz mumkin (caption bo'lsa savol matni bo'ladi)",
@@ -263,6 +269,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         'btn_start_group': 'Запустить в группе',
         'btn_stats': '📊 Статистика',
         'btn_edit_quiz': 'Редактировать',
+        'btn_export_docx': 'Файл теста (.docx)',
         'btn_edit_title': 'Название',
         'btn_edit_time': 'Время',
         'btn_back': 'Назад',
@@ -320,6 +327,11 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         'bot_username_missing': 'Не удалось получить username бота.',
         'share_link': 'Ссылка для шаринга:\n{link}',
         'group_start_link': 'Ссылка для запуска в группе:\n{link}',
+        'export_working': 'Готовлю файл теста...',
+        'export_failed': 'Не удалось создать файл: {err}',
+        'export_docx_caption': 'Файл теста (.docx): {title}\\nID: {id}\\nОтветы в конце.',
+        'export_answer_key_title': 'Ответы',
+        'export_sent_private_notice': 'Файл теста отправлен в личный чат.',
         'manual_title_prompt': 'Введите название нового теста:',
         'manual_title_required': 'Введите название теста:',
         'manual_first_question': 'Отправьте 1-й вопрос.\n- Можно текстом\n- Или картинку с вопросом (если есть подпись, это будет текст вопроса)',
@@ -450,6 +462,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         'btn_start_group': 'Start in group',
         'btn_stats': '📊 Statistics',
         'btn_edit_quiz': 'Edit',
+        'btn_export_docx': 'Quiz file (.docx)',
         'btn_edit_title': 'Edit title',
         'btn_edit_time': 'Edit time',
         'btn_back': 'Back',
@@ -507,6 +520,11 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         'bot_username_missing': 'Bot username not found.',
         'share_link': 'Share link:\n{link}',
         'group_start_link': 'Start in group link:\n{link}',
+        'export_working': 'Generating quiz file...',
+        'export_failed': 'Failed to create file: {err}',
+        'export_docx_caption': 'Quiz file (.docx): {title}\\nID: {id}\\nAnswers are at the end.',
+        'export_answer_key_title': 'Answer key',
+        'export_sent_private_notice': 'Quiz file was sent to your private chat.',
         'manual_title_prompt': 'Enter the new quiz title:',
         'manual_title_required': 'Please enter a quiz title:',
         'manual_first_question': 'Send question 1.\n- You can type text\n- Or send an image (caption will be used as the question text)',
@@ -642,4 +660,9 @@ def t(lang: str, key: str, **kwargs: Any) -> str:
         return msg.format(**kwargs)
     except Exception:
         return msg
+
+
+
+
+
 

@@ -1,7 +1,6 @@
 ﻿import asyncio
 import html
 import os
-import random
 import re
 import shutil
 import time
@@ -23,6 +22,7 @@ from config import AI_ENABLED, ADMIN_IDS, get_about_text
 from handlers.utils.i18n import lang_name, norm_ui_lang, t
 from services.ai_service import AIService, AIServiceError, extract_text_from_file
 from services.import_service import import_format_example, parse_quiz_payload
+from services.export_service import ExportServiceError, export_quiz_to_docx, suggest_docx_filename
 from services.database import (
     QuotaExceeded,
     create_premium_request,
@@ -51,7 +51,7 @@ ai_service = AIService()
 
 _DOWNLOAD_DIR = Path("downloads")
 _ALLOWED_SUFFIXES = {".pdf", ".docx", ".pptx", ".txt", ".md", ".json", ".png", ".jpg", ".jpeg", ".webp"}
-
+# Invisible placeholder keeps the Telegram message bubble compact for menu-only messages.
 # --- Quotas / limits -------------------------------------------------
 _PAYMENT_CARD_NUMBER = str(os.getenv('PAYMENT_CARD_NUMBER', '') or '').strip()
 _PAYMENT_CARD_HOLDER = str(os.getenv('PAYMENT_CARD_HOLDER', '') or '').strip()
@@ -241,33 +241,89 @@ def _kb_resume(token: str, *, ui_lang: str = "uz") -> types.InlineKeyboardMarkup
     return kb.as_markup()
 
 
-def _prepare_questions_for_run(questions: List[Dict[str, Any]], *, seed: str) -> List[Dict[str, Any]]:
-    """Shuffle options per question and update correct_index accordingly."""
-    rng = random.Random(str(seed or ""))
-    out: List[Dict[str, Any]] = []
-    for q in questions or []:
-        qq = dict(q or {})
-        options = qq.get("options") or []
-        if isinstance(options, list) and len(options) == 4:
-            opts = [str(o) for o in options]
-            try:
-                correct = int(qq.get("correct_index") or 0)
-            except Exception:
-                correct = 0
-            correct = max(0, min(3, correct))
-            order = [0, 1, 2, 3]
-            rng.shuffle(order)
-            qq["options"] = [opts[i] for i in order]
-            qq["correct_index"] = int(order.index(correct))
-        out.append(qq)
-    return out
-
-
 def _safe_filename(name: str) -> str:
     name = (name or "file").strip()
     name = Path(name).name
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
     return name or "file"
+
+async def _send_quiz_docx(
+    bot: Bot,
+    *,
+    quiz_id: int,
+    target_chat_id: int,
+    ui_lang: str,
+) -> bool:
+    """Generate a .docx for the quiz and send it. Returns True on success."""
+
+    try:
+        quiz = await get_quiz_with_questions(int(quiz_id))
+    except Exception:
+        quiz = None
+
+    if not quiz:
+        try:
+            await bot.send_message(int(target_chat_id), t(ui_lang, "quiz_not_found"))
+        except Exception:
+            pass
+        return False
+
+    filename = suggest_docx_filename(str(quiz.get("title") or "Quiz"), int(quiz_id))
+
+    # Keep uniqueness to avoid concurrent collisions.
+    export_dir = Path("media") / "exports"
+    try:
+        export_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    tmp_path = export_dir / f"{uuid.uuid4().hex}_{_safe_filename(filename)}"
+
+    answer_title = t(ui_lang, "export_answer_key_title")
+    try:
+        await asyncio.to_thread(
+            export_quiz_to_docx,
+            quiz,
+            tmp_path,
+            answer_title=answer_title,
+            include_answer_text=True,
+            include_explanations=False,
+            include_images=True,
+        )
+    except ExportServiceError as exc:
+        try:
+            await bot.send_message(int(target_chat_id), t(ui_lang, "export_failed", err=str(exc)))
+        except Exception:
+            pass
+        return False
+    except Exception as exc:
+        try:
+            await bot.send_message(int(target_chat_id), t(ui_lang, "export_failed", err=str(exc)))
+        except Exception:
+            pass
+        return False
+
+    try:
+        caption = t(
+            ui_lang,
+            "export_docx_caption",
+            title=str(quiz.get("title") or ""),
+            id=int(quiz_id),
+        )
+        await bot.send_document(int(target_chat_id), types.FSInputFile(str(tmp_path)), caption=caption)
+        return True
+    except Exception as exc:
+        try:
+            await bot.send_message(int(target_chat_id), t(ui_lang, "export_failed", err=str(exc)))
+        except Exception:
+            pass
+        return False
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 
 def _is_under_dir(path: Path, base_dir: Path) -> bool:
     try:
@@ -612,6 +668,7 @@ def _kb_quiz_share(
 
     if show_edit:
         kb.button(text=t(ui_lang, "btn_edit_quiz"), callback_data=f"quiz_edit:{quiz_id}")
+        kb.button(text=t(ui_lang, "btn_export_docx"), callback_data=f"quiz_export:{quiz_id}")
 
     kb.adjust(2)
     return kb.as_markup()
@@ -690,7 +747,7 @@ async def _start_saved_quiz(
 
     run_id = uuid.uuid4().hex
     ct = (chat_type or "private").strip().lower()
-    questions_prepared = _prepare_questions_for_run(list(questions), seed=run_id)
+    questions_prepared = [dict(q) for q in (questions or [])]
 
     run = QuizRun(
         run_id=run_id,
@@ -983,14 +1040,21 @@ async def _run_quiz(bot: Bot, run: QuizRun) -> None:
 def _kb_main_menu(ui_lang: str) -> types.InlineKeyboardMarkup:
     ui_lang = norm_ui_lang(ui_lang)
     kb = InlineKeyboardBuilder()
+
     kb.button(text=t(ui_lang, "btn_upload"), callback_data="menu_upload")
     if AI_ENABLED:
         kb.button(text=t(ui_lang, "btn_topic"), callback_data="menu_topic")
     kb.button(text=t(ui_lang, "btn_newquiz"), callback_data="menu_newquiz")
     kb.button(text=t(ui_lang, "btn_ui_lang"), callback_data="menu_ui_language")
     kb.button(text=t(ui_lang, "btn_premium"), callback_data="menu_premium")
-    kb.adjust(2)
+
+    if AI_ENABLED:
+        kb.adjust(2, 2, 1)
+    else:
+        kb.adjust(2, 2, 1)
+
     return kb.as_markup()
+
 
 
 async def _cancel_user_runs(bot: Bot, chat_id: int, user_id: int) -> int:
@@ -1085,6 +1149,8 @@ async def cmd_menu(message: types.Message) -> None:
     await message.answer(t(ui_lang, "menu"), reply_markup=_kb_main_menu(ui_lang))
 
 
+
+
 @router.message(Command("topic"))
 async def cmd_topic(message: types.Message, state: FSMContext) -> None:
     if not message.from_user:
@@ -1130,6 +1196,53 @@ async def quiz_share_fallback(call: types.CallbackQuery, bot: Bot) -> None:
     await call.answer()
     if call.message:
         await call.message.answer(t(ui_lang, "share_link", link=link))
+
+
+
+@router.callback_query(F.data.startswith("quiz_export:"))
+async def quiz_export_docx(call: types.CallbackQuery, bot: Bot) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    try:
+        quiz_id = int(call.data.split(":", 1)[1])
+    except Exception:
+        await call.answer(t(ui_lang, "error_short"), show_alert=True)
+        return
+
+    summary = await get_quiz_summary(int(quiz_id))
+    if not summary:
+        await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
+        return
+
+    creator_id = int(summary.get("creator_id") or 0)
+    if (int(call.from_user.id) != creator_id) and (int(call.from_user.id) not in ADMIN_IDS):
+        await call.answer(t(ui_lang, "edit_creator_only"), show_alert=True)
+        return
+
+    await call.answer(t(ui_lang, "export_working"))
+
+    chat_id = int(call.message.chat.id) if call.message else int(call.from_user.id)
+    chat_type = str(call.message.chat.type) if call.message else "private"
+    ct = (chat_type or "").strip().lower()
+
+    if ct in {"group", "supergroup"}:
+        sent_private = await _send_quiz_docx(
+            bot,
+            quiz_id=int(quiz_id),
+            target_chat_id=int(call.from_user.id),
+            ui_lang=ui_lang,
+        )
+        if sent_private:
+            try:
+                await bot.send_message(int(chat_id), t(ui_lang, "export_sent_private_notice"))
+            except Exception:
+                pass
+            return
+
+        # Fallback to current chat if private is unavailable.
+        await _send_quiz_docx(bot, quiz_id=int(quiz_id), target_chat_id=int(chat_id), ui_lang=ui_lang)
+        return
+
+    await _send_quiz_docx(bot, quiz_id=int(quiz_id), target_chat_id=int(chat_id), ui_lang=ui_lang)
 
 
 @router.callback_query(F.data.startswith("quiz_startgroup_fallback:"))
@@ -1749,7 +1862,7 @@ async def prem_back(call: types.CallbackQuery) -> None:
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
     if call.message:
-        await call.message.answer(t(ui_lang, 'menu'), reply_markup=_kb_main_menu(ui_lang))
+        await call.message.answer(t(ui_lang, "menu"), reply_markup=_kb_main_menu(ui_lang))
 
 
 @router.callback_query(F.data == 'prem_back_plans')
@@ -4381,6 +4494,77 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
         await status.edit_text(t(ui_lang, "extracting_text"))
         text = await asyncio.to_thread(extract_text_from_file, str(local_path))
 
+        # If the uploaded file already contains a ready quiz (questions + answers),
+        # import it as-is (preserves the file order).
+        parsed_title = ""
+        ready_questions: List[Dict[str, Any]] = []
+        try:
+            parsed_title, ready_questions = parse_quiz_payload(text, title_fallback=Path(file_name).stem)
+        except Exception:
+            parsed_title, ready_questions = ("", [])
+
+        if ready_questions:
+            starts = len(re.findall(r"(?m)^\s*(?:Q(?:uestion)?\s*)?\d{1,3}\s*[).:\-]", text or ""))
+            if starts >= 3 and len(ready_questions) < max(1, int(starts * 0.6)):
+                ready_questions = []
+
+        if ready_questions:
+            title2 = (parsed_title or Path(file_name).stem).strip()[:120]
+            open_period2 = 30
+            if caption:
+                m = re.search(r"(?i)\b(?:time|sec|sek|sekund|soniya)\s*[:\-]\s*(\d{1,3})\b", caption)
+                if m and m.group(1).isdigit():
+                    open_period2 = int(m.group(1))
+                else:
+                    m = _TIME_HINT_RE.search(caption)
+                    if m and m.group(1).isdigit():
+                        open_period2 = int(m.group(1))
+                open_period2 = max(5, min(600, int(open_period2 or 30)))
+
+            await status.edit_text(t(ui_lang, "importing_quiz"))
+
+            user = message.from_user
+            if not user:
+                await status.edit_text(t(ui_lang, "error_short"))
+                return
+            await get_or_create_user(
+                user_id=user.id,
+                full_name=user.full_name,
+                username=getattr(user, "username", None),
+            )
+
+            reservation = None
+            try:
+                reservation = await reserve_user_quota(user.id, 'file')
+            except QuotaExceeded as exc:
+                await status.edit_text(_quota_exceeded_text(ui_lang, exc), reply_markup=_kb_premium_plans(ui_lang))
+                return
+
+            quiz_id = await create_quiz(title=title2, creator_id=user.id, is_ai_generated=False, open_period=open_period2)
+            inserted = await create_questions_bulk(quiz_id, ready_questions)
+            if inserted <= 0:
+                if reservation:
+                    await refund_user_quota(reservation)
+                await status.edit_text(t(ui_lang, "import_failed"))
+                await message.answer(import_format_example())
+                return
+
+            username = await _get_bot_username(bot)
+            await status.edit_text(
+                t(ui_lang, "import_ok", title=title2, n=inserted, id=int(quiz_id)),
+                reply_markup=_kb_quiz_share(
+                    username,
+                    quiz_id,
+                    title=title2,
+                    question_count=inserted,
+                    chat_type=message.chat.type,
+                    ui_lang=ui_lang,
+                    show_stats=True,
+                    show_edit=True,
+                ),
+            )
+            return
+
         if len(text.strip()) < 200:
             if suffix == ".pdf":
                 # Likely a scanned PDF (no extractable text). Render pages to images and use Gemini vision.
@@ -4522,4 +4706,11 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
                 local_path.unlink(missing_ok=True)
             except Exception:
                 pass
+
+
+
+
+
+
+
 

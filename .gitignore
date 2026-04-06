@@ -1,0 +1,21 @@
+﻿# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local data
+quiz_bot.db
+*.sqlite
+*.sqlite3
+logs/
+downloads/
+media/
+
+# OS
+.DS_Store
+Thumbs.db

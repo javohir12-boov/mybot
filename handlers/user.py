@@ -1701,9 +1701,11 @@ async def set_lang(call: types.CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == "menu_upload")
-async def menu_upload(call: types.CallbackQuery) -> None:
+async def menu_upload(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()
+    await state.clear()
     ui_lang = await _get_ui_lang(call.from_user.id)
+    await state.set_state(UploadStates.await_file)
     if call.message:
         key = "upload_hint" if AI_ENABLED else "upload_hint_noai"
         await call.message.answer(t(ui_lang, key))
@@ -1752,6 +1754,10 @@ class PremiumStates(StatesGroup):
     await_screenshot = State()
 
 
+
+
+class UploadStates(StatesGroup):
+    await_file = State()
 def _fmt_money_uzs(amount: int) -> str:
     try:
         return f"{int(amount):,}".replace(",", " ")
@@ -4250,7 +4256,8 @@ async def ai_choose_lang(call: types.CallbackQuery, state: FSMContext, bot: Bot)
 @router.message(F.photo)
 async def on_photo_upload(message: types.Message, bot: Bot, state: FSMContext) -> None:
     # Only handle photo uploads when user is not inside another FSM flow (manual/AI/etc).
-    if await state.get_state():
+    st = await state.get_state()
+    if st != UploadStates.await_file.state:
         return
 
     user_id = message.from_user.id if message.from_user else 0
@@ -4321,7 +4328,8 @@ async def on_photo_upload(message: types.Message, bot: Bot, state: FSMContext) -
 @router.message(F.document)
 async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> None:
     # Ignore documents while user is in another FSM flow (manual quiz, premium, etc).
-    if await state.get_state():
+    st = await state.get_state()
+    if st != UploadStates.await_file.state:
         return
 
     doc = message.document
@@ -4335,7 +4343,7 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
         await message.answer(t(ui_lang, "file_type_only"))
         return
 
-    max_mb = int(os.getenv("MAX_UPLOAD_MB", "5") or 5)
+    max_mb = _max_upload_mb_for_suffix(suffix)
     if doc.file_size and int(doc.file_size) > max_mb * 1024 * 1024:
         await message.answer(t(ui_lang, "file_too_large", mb=max_mb))
         return
@@ -4463,6 +4471,8 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
             quiz_id = await create_quiz(title=title, creator_id=user.id, is_ai_generated=False, open_period=open_period)
             inserted = await create_questions_bulk(quiz_id, questions)
             if inserted <= 0:
+                if reservation:
+                    await refund_user_quota(reservation)
                 await status.edit_text(t(ui_lang, "import_failed"))
                 await message.answer(import_format_example())
                 return

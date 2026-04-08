@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import html
 import os
 import re
@@ -3255,7 +3255,7 @@ async def ai_cancel(call: types.CallbackQuery, state: FSMContext) -> None:
     if not data.get("ai_ui_lang"):
         ui_lang = await _get_ui_lang(call.from_user.id)
     if data.get("ai_session_id") != session_id:
-        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        await call.answer(t(ui_lang, "session_missing"), show_alert=True)
         return
     image_paths = list(data.get("ai_image_paths") or [])
     pdf_path = str(data.get("ai_pdf_path") or "").strip()
@@ -3317,7 +3317,7 @@ async def ai_pages(call: types.CallbackQuery, state: FSMContext) -> None:
     if not data.get("ai_ui_lang"):
         ui_lang = await _get_ui_lang(call.from_user.id)
     if data.get("ai_session_id") != session_id:
-        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        await call.answer(t(ui_lang, "session_missing"), show_alert=True)
         return
     if data.get("ai_user_id") != call.from_user.id:
         await call.answer(t(ui_lang, "session_owner_only"), show_alert=True)
@@ -3365,7 +3365,7 @@ async def ai_topic(call: types.CallbackQuery, state: FSMContext) -> None:
     if not data.get("ai_ui_lang"):
         ui_lang = await _get_ui_lang(call.from_user.id)
     if data.get("ai_session_id") != session_id:
-        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        await call.answer(t(ui_lang, "session_missing"), show_alert=True)
         return
     if data.get("ai_user_id") != call.from_user.id:
         await call.answer(t(ui_lang, "session_owner_only"), show_alert=True)
@@ -3862,7 +3862,7 @@ async def ai_choose_count(call: types.CallbackQuery, state: FSMContext) -> None:
     if not data.get("ai_ui_lang"):
         ui_lang = await _get_ui_lang(call.from_user.id)
     if data.get("ai_session_id") != session_id:
-        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        await call.answer(t(ui_lang, "session_missing"), show_alert=True)
         return
     if data.get("ai_user_id") != call.from_user.id:
         await call.answer(t(ui_lang, "session_owner_only"), show_alert=True)
@@ -3903,7 +3903,7 @@ async def ai_choose_time(call: types.CallbackQuery, state: FSMContext) -> None:
     if not data.get("ai_ui_lang"):
         ui_lang = await _get_ui_lang(call.from_user.id)
     if data.get("ai_session_id") != session_id:
-        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        await call.answer(t(ui_lang, "session_missing"), show_alert=True)
         return
     if data.get("ai_user_id") != call.from_user.id:
         await call.answer(t(ui_lang, "session_owner_only"), show_alert=True)
@@ -4149,7 +4149,7 @@ async def ai_choose_difficulty(call: types.CallbackQuery, state: FSMContext) -> 
     if not data.get("ai_ui_lang"):
         ui_lang = await _get_ui_lang(call.from_user.id)
     if data.get("ai_session_id") != session_id:
-        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        await call.answer(t(ui_lang, "session_missing"), show_alert=True)
         return
     if data.get("ai_user_id") != call.from_user.id:
         await call.answer(t(ui_lang, "session_owner_only"), show_alert=True)
@@ -4181,7 +4181,7 @@ async def ai_translate(call: types.CallbackQuery, state: FSMContext, bot: Bot) -
     if not data.get("ai_ui_lang"):
         ui_lang = await _get_ui_lang(call.from_user.id)
     if data.get("ai_session_id") != session_id:
-        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        await call.answer(t(ui_lang, "session_missing"), show_alert=True)
         return
     if data.get("ai_user_id") != call.from_user.id:
         await call.answer(t(ui_lang, "session_owner_only"), show_alert=True)
@@ -4234,7 +4234,7 @@ async def ai_choose_lang(call: types.CallbackQuery, state: FSMContext, bot: Bot)
     if not data.get("ai_ui_lang"):
         ui_lang = await _get_ui_lang(call.from_user.id)
     if data.get("ai_session_id") != session_id:
-        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        await call.answer(t(ui_lang, "session_missing"), show_alert=True)
         return
     if data.get("ai_user_id") != call.from_user.id:
         await call.answer(t(ui_lang, "session_owner_only"), show_alert=True)

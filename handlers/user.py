@@ -18,7 +18,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from config import AI_ENABLED, ADMIN_IDS, get_about_text
+from config import AI_ENABLED, ADMIN_IDS, REQUIRED_CHANNEL, get_about_text
 from handlers.utils.i18n import lang_name, norm_ui_lang, t
 from services.ai_service import AIService, AIServiceError, extract_text_from_file
 from services.import_service import import_format_example, parse_quiz_payload
@@ -1057,6 +1057,41 @@ def _kb_main_menu(ui_lang: str) -> types.InlineKeyboardMarkup:
 
 
 
+
+def _required_channel_url() -> str:
+    ch = str(REQUIRED_CHANNEL or "").strip()
+    if not ch:
+        return ""
+    if ch.startswith("https://") or ch.startswith("http://"):
+        return ch
+    if ch.startswith("@"):
+        return "https://t.me/" + ch[1:]
+    if ch.startswith("t.me/"):
+        return "https://" + ch
+    return ""
+
+def _kb_required_channel(ui_lang: str) -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    url = _required_channel_url()
+    if url:
+        kb.button(text=t(ui_lang, "btn_join_channel"), url=url)
+    else:
+        kb.button(text=t(ui_lang, "btn_join_channel"), callback_data="check_sub")
+    kb.button(text=t(ui_lang, "btn_check_sub"), callback_data="check_sub")
+    kb.adjust(1)
+    return kb.as_markup()
+
+async def _is_user_subscribed(bot: Bot, user_id: int) -> bool:
+    ch = str(REQUIRED_CHANNEL or "").strip()
+    if not ch:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=ch, user_id=int(user_id))
+        status = str(getattr(member, "status", "") or "").lower()
+        return status in {"creator", "administrator", "member"}
+    except Exception:
+        return False
 async def _cancel_user_runs(bot: Bot, chat_id: int, user_id: int) -> int:
     cancelled = 0
     for run in list(_ACTIVE_RUNS.values()):
@@ -1148,6 +1183,26 @@ async def cmd_menu(message: types.Message) -> None:
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
     await message.answer(t(ui_lang, "menu_help"), reply_markup=_kb_main_menu(ui_lang))
 
+
+@router.callback_query(F.data == "check_sub")
+async def check_subscription(call: types.CallbackQuery, bot: Bot) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id if call.from_user else 0)
+    ch = str(REQUIRED_CHANNEL or "").strip()
+
+    ok = await _is_user_subscribed(bot, call.from_user.id if call.from_user else 0)
+    if not ok:
+        await call.answer(t(ui_lang, "sub_check_fail"), show_alert=True)
+        if call.message:
+            await call.message.answer(
+                t(ui_lang, "must_join_channel", channel=ch),
+                reply_markup=_kb_required_channel(ui_lang),
+                disable_web_page_preview=True,
+            )
+        return
+
+    await call.answer(t(ui_lang, "sub_check_ok"), show_alert=False)
+    if call.message:
+        await call.message.answer(get_about_text(ui_lang), reply_markup=_kb_main_menu(ui_lang))
 
 
 

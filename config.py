@@ -77,6 +77,17 @@ SQL_PASSWORD = _get_env("SQL_PASSWORD", "0000")
 _admin_raw = _get_env("ADMIN_IDS", "123456789,987654321")
 ADMIN_IDS = [int(x.strip()) for x in str(_admin_raw).split(",") if x.strip()]
 
+# Required channel subscription (optional). Users must join this channel to use the bot.
+_req_ch = str(_get_env("REQUIRED_CHANNEL", "@CreateQuiz_news") or "").strip()
+if _req_ch.startswith("https://t.me/"):
+    _req_ch = "@" + _req_ch.rsplit("/", 1)[-1].split("?", 1)[0]
+elif _req_ch.startswith("t.me/"):
+    _req_ch = "@" + _req_ch.rsplit("/", 1)[-1].split("?", 1)[0]
+elif _req_ch and not _req_ch.startswith("@") and not str(_req_ch).lstrip('-').isdigit():
+    _req_ch = "@" + _req_ch.lstrip("@")
+REQUIRED_CHANNEL = _req_ch
+
+
 THROTTLED_USERS: Dict[int, float] = {}
 
 # --- Webhook (optional) ------------------------------------------
@@ -148,6 +159,7 @@ __all__ = [
     "SQL_ECHO",
     "SQL_PASSWORD",
     "ADMIN_IDS",
+    "REQUIRED_CHANNEL",
     "THROTTLED_USERS",
     "WEBHOOK_URL",
     "WEBHOOK_PATH",

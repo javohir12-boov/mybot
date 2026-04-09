@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -12,6 +12,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     'uz': {
         'menu': 'Menyu:',
         'about_menu': 'Menyu:',
+        'menu_help': "Menyudagi bo'limlar:\n- Fayl yuklash: fayl yoki elektron kitob yuklash orqali test tuzishingiz mumkin.\n- Mavzu bo'yicha test: mavzuni yozib, qiyinlik/son/vaqtni tanlab test tuzishingiz mumkin.\n- Yangi test: savollarni qo'lda kiritib test tuzishingiz mumkin.\n- Interfeys tili: botning interfeys tilini o'zgartirishingiz mumkin.\n- Premium: limitlarni oshirish va premium olish bo'limi.",
         'ui_lang_choose': 'Interfeys tilini tanlang:',
         'ui_lang_saved': 'Saqladim. Interfeys tili: {lang_name}',
         'ai_lang_choose': 'Tarjima tili (default) ni tanlang:',
@@ -398,6 +399,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     'en': {
         'menu': 'Menu:',
         'about_menu': 'Menu:',
+        'menu_help': 'Menu sections:\n- Upload file: send a file or an e-book and the bot will create a quiz.\n- Quiz by topic: type a topic, choose difficulty/count/time and get a quiz.\n- New quiz: create a quiz manually by adding questions and options.\n- Interface language: change the language of buttons and messages.\n- Premium: increase limits and manage premium access.',
         'ui_lang_choose': 'Choose UI language:',
         'ui_lang_saved': 'Saved. UI language: {lang_name}',
         'ai_lang_choose': 'Choose AI translation language (default):',

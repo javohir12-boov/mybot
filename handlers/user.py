@@ -1146,7 +1146,7 @@ async def cmd_start(message: types.Message, state: FSMContext) -> None:
 @router.message(Command("menu"))
 async def cmd_menu(message: types.Message) -> None:
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
-    await message.answer(t(ui_lang, "menu"), reply_markup=_kb_main_menu(ui_lang))
+    await message.answer(t(ui_lang, "menu_help"), reply_markup=_kb_main_menu(ui_lang))
 
 
 
@@ -1868,7 +1868,7 @@ async def prem_back(call: types.CallbackQuery) -> None:
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
     if call.message:
-        await call.message.answer(t(ui_lang, "menu"), reply_markup=_kb_main_menu(ui_lang))
+        await call.message.answer(t(ui_lang, "menu_help"), reply_markup=_kb_main_menu(ui_lang))
 
 
 @router.callback_query(F.data == 'prem_back_plans')

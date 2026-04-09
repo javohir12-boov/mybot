@@ -94,7 +94,9 @@ except Exception:
 # Text shown on /start. Put your own text into .env as ABOUT_TEXT="..."
 ABOUT_TEXT = _get_env(
     "ABOUT_TEXT",
-    "Bu bot siz yuklagan test fayli asosida testlar tuzib beradi. Shuningdek, agar ma'lum bir mavzu bo'yicha testlar kerak bo'lsa, ularni ham yaratib beradi. Bundan tashqari, kitob yuklash orqali undagi mavzular asosida testlar tuzishda ham yordam beradi.",
+    "Bu bot siz yuklagan fayl yoki elektron kitob asosida testlar tuzib beradi. "
+    "Shuningdek, agar ma'lum bir mavzu bo'yicha testlar kerak bo'lsa, ularni ham yaratib beradi. "
+    "Bundan tashqari, kitob yuklash orqali undagi mavzular asosida testlar tuzishda ham yordam beradi.",
 )
 ABOUT_TEXT = str(ABOUT_TEXT).replace("\\n", "\n")
 

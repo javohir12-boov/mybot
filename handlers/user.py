@@ -1279,6 +1279,8 @@ async def cmd_topic(message: types.Message, state: FSMContext, bot: Bot) -> None
 
 @router.callback_query(F.data.startswith("quiz_share:"))
 async def quiz_share_fallback(call: types.CallbackQuery, bot: Bot) -> None:
+    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
+        return
     # Fallback if URL buttons can't be built (no username).
     ui_lang = await _get_ui_lang(call.from_user.id)
     try:
@@ -1301,6 +1303,8 @@ async def quiz_share_fallback(call: types.CallbackQuery, bot: Bot) -> None:
 
 @router.callback_query(F.data.startswith("quiz_export:"))
 async def quiz_export_docx(call: types.CallbackQuery, bot: Bot) -> None:
+    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
+        return
     ui_lang = await _get_ui_lang(call.from_user.id)
     try:
         quiz_id = int(call.data.split(":", 1)[1])
@@ -1315,8 +1319,6 @@ async def quiz_export_docx(call: types.CallbackQuery, bot: Bot) -> None:
 
     creator_id = int(summary.get("creator_id") or 0)
     if (int(call.from_user.id) != creator_id) and (int(call.from_user.id) not in ADMIN_IDS):
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-        return
         await call.answer(t(ui_lang, "edit_creator_only"), show_alert=True)
         return
 

@@ -41,7 +41,7 @@ class SecurityMiddleware(BaseMiddleware):
         ui_lang_cache_ttl_sec: int = 600,
         required_channel: str = REQUIRED_CHANNEL,
         sub_cache_ttl_sec: int = 300,
-        sub_prompt_every_sec: int = 4,
+        sub_prompt_every_sec: float = 0,
     ) -> None:
         super().__init__()
         self.rate = max(0.1, float(rate_per_sec))
@@ -53,7 +53,7 @@ class SecurityMiddleware(BaseMiddleware):
 
         self.required_channel = str(required_channel or "").strip()
         self.sub_cache_ttl_sec = max(5, int(sub_cache_ttl_sec))
-        self.sub_prompt_every_sec = max(1, int(sub_prompt_every_sec))
+        self.sub_prompt_every_sec = max(0.0, float(sub_prompt_every_sec))
 
         # Normalize channel username/id for get_chat_member.
         ch = self.required_channel
@@ -191,10 +191,11 @@ class SecurityMiddleware(BaseMiddleware):
 
     async def _prompt_must_join(self, event: Any, *, user_id: int) -> None:
         now = time.monotonic()
-        last = float(self._last_sub_prompt.get(int(user_id), 0.0) or 0.0)
-        if now - last < float(self.sub_prompt_every_sec):
-            return
-        self._last_sub_prompt[int(user_id)] = now
+        if float(self.sub_prompt_every_sec) > 0:
+            last = float(self._last_sub_prompt.get(int(user_id), 0.0) or 0.0)
+            if now - last < float(self.sub_prompt_every_sec):
+                return
+            self._last_sub_prompt[int(user_id)] = now
 
         ui_lang = self._get_ui_lang_cached(int(user_id))
         ch = str(self.required_channel or "").strip()
@@ -248,44 +249,43 @@ class SecurityMiddleware(BaseMiddleware):
         uid = int(user.id)
         is_admin = uid in set(ADMIN_IDS or [])
 
-        # Rate limit: skip for admins, enforce for regular users.
-        if not is_admin:
-            allowed, wait_sec = self._allow(uid)
-            if not allowed:
-                await self._warn_rate_limited(event, user_id=uid, wait_sec=wait_sec)
-                self._gc()
-                return None
-
         await self._refresh_user(user)
 
         # Mandatory channel subscription gate (optional).
+        is_check_sub = isinstance(event, types.CallbackQuery) and str(getattr(event, "data", "") or "") == "check_sub"
         if str(self.required_channel or "").strip():
-            # Allow the explicit check callback to pass through.
-            if isinstance(event, types.CallbackQuery) and str(getattr(event, "data", "") or "") == "check_sub":
+            bot = None
+            try:
+                bot = data.get("bot") or getattr(event, "bot", None)
+            except Exception:
+                bot = None
+
+            if bot is None:
+                await self._prompt_must_join(event, user_id=uid)
+                self._gc()
+                return None
+
+            # Allow the explicit check callback to refresh cached membership status.
+            if is_check_sub:
                 try:
-                    bot = data.get("bot") or getattr(event, "bot", None)
-                    if bot is not None:
-                        await self._is_subscribed(bot, uid, force=True)
+                    await self._is_subscribed(bot, uid, force=True)
                 except Exception:
                     pass
             else:
-                bot = None
-                try:
-                    bot = data.get("bot") or getattr(event, "bot", None)
-                except Exception:
-                    bot = None
-
-                if bot is None:
-                    # Can't validate subscription without bot instance: be safe and block.
-                    await self._prompt_must_join(event, user_id=uid)
-                    self._gc()
-                    return None
-
                 subscribed = await self._is_subscribed(bot, uid)
                 if not subscribed:
                     await self._prompt_must_join(event, user_id=uid)
                     self._gc()
                     return None
+
+        # Rate limit: skip for admins and the subscription check button,
+        # enforce for everyone else who has already passed the join gate.
+        if not is_admin and not is_check_sub:
+            allowed, wait_sec = self._allow(uid)
+            if not allowed:
+                await self._warn_rate_limited(event, user_id=uid, wait_sec=wait_sec)
+                self._gc()
+                return None
 
         self._gc()
         return await handler(event, data)

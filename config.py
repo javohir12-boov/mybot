@@ -1,4 +1,4 @@
-import os
+﻿import os
 from pathlib import Path
 from typing import Any, Dict
 
@@ -26,8 +26,14 @@ def _load_dotenv(dotenv_path: Path) -> None:
             "YOUR_TOKEN_HERE",
         }:
             continue
-        if key and key not in preexisting:
-            os.environ[key] = val
+        if not key:
+            continue
+        if key in preexisting:
+            # If an env var exists but is empty/blank, allow .env to fill it.
+            existing = str(os.environ.get(key, "") or "")
+            if existing.strip():
+                continue
+        os.environ[key] = val
 
 _ROOT = Path(__file__).parent
 _load_dotenv(_ROOT / ".env")
@@ -178,3 +184,4 @@ __all__ = [
     "ABOUT_TEXT_KO",
     "get_about_text",
 ]
+

@@ -1092,6 +1092,43 @@ async def _is_user_subscribed(bot: Bot, user_id: int) -> bool:
         return status in {"creator", "administrator", "member"}
     except Exception:
         return False
+
+async def _ensure_subscribed(event: object, bot: Bot, user_id: int) -> bool:
+    user_id = int(user_id or 0)
+    ch = str(REQUIRED_CHANNEL or "").strip()
+    if not ch:
+        return True
+    if not user_id:
+        return True
+
+    ok = await _is_user_subscribed(bot, user_id)
+    if ok:
+        return True
+
+    ui_lang = await _get_ui_lang(user_id)
+    try:
+        if isinstance(event, types.CallbackQuery):
+            try:
+                await event.answer(t(ui_lang, "sub_required_alert"), show_alert=False)
+            except Exception:
+                pass
+            if getattr(event, "message", None):
+                await event.message.answer(
+                    t(ui_lang, "must_join_channel", channel=ch),
+                    reply_markup=_kb_required_channel(ui_lang),
+                    disable_web_page_preview=True,
+                )
+        elif isinstance(event, types.Message):
+            await event.answer(
+                t(ui_lang, "must_join_channel", channel=ch),
+                reply_markup=_kb_required_channel(ui_lang),
+                disable_web_page_preview=True,
+            )
+    except Exception:
+        pass
+
+    return False
+
 async def _cancel_user_runs(bot: Bot, chat_id: int, user_id: int) -> int:
     cancelled = 0
     for run in list(_ACTIVE_RUNS.values()):
@@ -1118,6 +1155,8 @@ async def cmd_start_deeplink(
     bot: Bot,
 ) -> None:
     await state.clear()
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
     if message.from_user:
         await get_or_create_user(
             user_id=message.from_user.id,
@@ -1165,7 +1204,9 @@ async def cmd_start_deeplink(
 
 
 @router.message(CommandStart())
-async def cmd_start(message: types.Message, state: FSMContext) -> None:
+async def cmd_start(message: types.Message, state: FSMContext, bot: Bot) -> None:
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
     await state.clear()
     if message.from_user:
         await get_or_create_user(
@@ -1179,7 +1220,9 @@ async def cmd_start(message: types.Message, state: FSMContext) -> None:
 
 
 @router.message(Command("menu"))
-async def cmd_menu(message: types.Message) -> None:
+async def cmd_menu(message: types.Message, bot: Bot) -> None:
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
     await message.answer(t(ui_lang, "menu_help"), reply_markup=_kb_main_menu(ui_lang))
 
@@ -1207,7 +1250,9 @@ async def check_subscription(call: types.CallbackQuery, bot: Bot) -> None:
 
 
 @router.message(Command("topic"))
-async def cmd_topic(message: types.Message, state: FSMContext) -> None:
+async def cmd_topic(message: types.Message, state: FSMContext, bot: Bot) -> None:
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
     if not message.from_user:
         return
     if not AI_ENABLED:
@@ -1270,6 +1315,8 @@ async def quiz_export_docx(call: types.CallbackQuery, bot: Bot) -> None:
 
     creator_id = int(summary.get("creator_id") or 0)
     if (int(call.from_user.id) != creator_id) and (int(call.from_user.id) not in ADMIN_IDS):
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
         await call.answer(t(ui_lang, "edit_creator_only"), show_alert=True)
         return
 
@@ -1692,13 +1739,17 @@ def _kb_ui_language_settings(ui_lang: str) -> types.InlineKeyboardMarkup:
 
 @router.message(Command("til"))
 @router.message(Command("lang"))
-async def cmd_ui_language(message: types.Message) -> None:
+async def cmd_ui_language(message: types.Message, bot: Bot) -> None:
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
     await message.answer(t(ui_lang, "ui_lang_choose"), reply_markup=_kb_ui_language_settings(ui_lang))
 
 
 @router.callback_query(F.data == "menu_ui_language")
-async def menu_ui_language(call: types.CallbackQuery) -> None:
+async def menu_ui_language(call: types.CallbackQuery, bot: Bot) -> None:
+    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
+        return
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
     if call.message:
@@ -1706,7 +1757,9 @@ async def menu_ui_language(call: types.CallbackQuery) -> None:
 
 
 @router.message(Command("language"))
-async def cmd_language(message: types.Message) -> None:
+async def cmd_language(message: types.Message, bot: Bot) -> None:
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
     if not AI_ENABLED:
         await message.answer(t(ui_lang, "ai_disabled"))
@@ -1715,7 +1768,9 @@ async def cmd_language(message: types.Message) -> None:
 
 
 @router.callback_query(F.data == "menu_language")
-async def menu_language(call: types.CallbackQuery) -> None:
+async def menu_language(call: types.CallbackQuery, bot: Bot) -> None:
+    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
+        return
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
     if not AI_ENABLED:
@@ -1756,7 +1811,9 @@ async def set_lang(call: types.CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == "menu_upload")
-async def menu_upload(call: types.CallbackQuery, state: FSMContext) -> None:
+async def menu_upload(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
+        return
     await call.answer()
     await state.clear()
     ui_lang = await _get_ui_lang(call.from_user.id)
@@ -1767,7 +1824,9 @@ async def menu_upload(call: types.CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(F.data == "menu_topic")
-async def menu_topic(call: types.CallbackQuery, state: FSMContext) -> None:
+async def menu_topic(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
+        return
     await call.answer()
     await state.clear()
     ui_lang = await _get_ui_lang(call.from_user.id)
@@ -1793,7 +1852,9 @@ async def menu_topic(call: types.CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(F.data == "menu_newquiz")
-async def menu_newquiz(call: types.CallbackQuery, state: FSMContext) -> None:
+async def menu_newquiz(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
+        return
     await call.answer()
     await state.clear()
     ui_lang = await _get_ui_lang(call.from_user.id)
@@ -1806,6 +1867,8 @@ async def menu_newquiz(call: types.CallbackQuery, state: FSMContext) -> None:
 
 
 class PremiumStates(StatesGroup):
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
     await_screenshot = State()
 
 
@@ -1901,7 +1964,9 @@ def _premium_menu_text(ui_lang: str, status: dict) -> str:
 
 
 @router.message(Command('premium'))
-async def cmd_premium(message: types.Message) -> None:
+async def cmd_premium(message: types.Message, bot: Bot) -> None:
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
     if not message.from_user:
         return
     ui_lang = await _get_ui_lang(message.from_user.id)
@@ -1910,7 +1975,9 @@ async def cmd_premium(message: types.Message) -> None:
 
 
 @router.callback_query(F.data == 'menu_premium')
-async def menu_premium(call: types.CallbackQuery) -> None:
+async def menu_premium(call: types.CallbackQuery, bot: Bot) -> None:
+    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
+        return
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
     st = await get_user_quota_status(call.from_user.id)
@@ -2017,6 +2084,8 @@ def _is_screenshot_document(message: types.Message) -> bool:
         return False
     name = (doc.file_name or '').lower()
     if any(name.endswith(ext) for ext in ('.jpg', '.jpeg', '.png', '.webp', '.pdf')):
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
         return True
     mt = (doc.mime_type or '').lower()
     return mt.startswith('image/')
@@ -2537,6 +2606,8 @@ async def prem_admin_no(call: types.CallbackQuery, bot: Bot) -> None:
     await call.answer('Rejected')
 @router.callback_query(F.data == "menu_myquizzes")
 async def menu_myquizzes(call: types.CallbackQuery, bot: Bot) -> None:
+    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
+        return
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
     quizzes = await list_user_quizzes(call.from_user.id, limit=20)
@@ -2569,11 +2640,15 @@ async def menu_myquizzes(call: types.CallbackQuery, bot: Bot) -> None:
         )
 
     if len(quizzes) > len(shown):
+    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
+        return
         await call.message.answer(t(ui_lang, "more_quizzes", n=(len(quizzes) - len(shown))))
 
 
 @router.message(Command("mytests"))
 async def cmd_mytests(message: types.Message, bot: Bot) -> None:
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
     if not message.from_user:
         return
     ui_lang = await _get_ui_lang(message.from_user.id)
@@ -2603,11 +2678,15 @@ async def cmd_mytests(message: types.Message, bot: Bot) -> None:
         )
 
     if len(quizzes) > len(shown):
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
         await message.answer(t(ui_lang, "more_quizzes", n=(len(quizzes) - len(shown))))
 
 
 @router.callback_query(F.data == "menu_cancel")
 async def menu_cancel(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
+        return
     await call.answer()
     chat_id = call.message.chat.id if call.message else 0
     cancelled = await _cancel_user_runs(bot, chat_id=chat_id, user_id=call.from_user.id)
@@ -2618,7 +2697,9 @@ async def menu_cancel(call: types.CallbackQuery, state: FSMContext, bot: Bot) ->
 
 
 @router.message(Command("newquiz"))
-async def cmd_newquiz(message: types.Message, state: FSMContext) -> None:
+async def cmd_newquiz(message: types.Message, state: FSMContext, bot: Bot) -> None:
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
     await state.clear()
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
     await state.update_data(m_ui_lang=ui_lang)
@@ -2627,6 +2708,8 @@ async def cmd_newquiz(message: types.Message, state: FSMContext) -> None:
 
 
 class ManualQuizStates(StatesGroup):
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
     title = State()
     open_period = State()
     question = State()
@@ -2909,6 +2992,8 @@ class AIQuizStates(StatesGroup):
 
 @router.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext, bot: Bot) -> None:
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
     user_id = message.from_user.id if message.from_user else 0
     cancelled = await _cancel_user_runs(bot, chat_id=message.chat.id, user_id=user_id)
     await state.clear()
@@ -2934,6 +3019,8 @@ def _kb_counts(
     elif max_n not in nums and max_n <= 20:
         nums.append(max_n)
     for n in sorted(set(nums)):
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
         kb.button(text=f"{n} ta", callback_data=f"ai_count:{session_id}:{n}")
     if show_pages:
         kb.button(text=t(ui_lang, "btn_pages_optional"), callback_data=f"ai_pages:{session_id}:count")
@@ -4310,6 +4397,8 @@ async def ai_choose_lang(call: types.CallbackQuery, state: FSMContext, bot: Bot)
 
 @router.message(F.photo)
 async def on_photo_upload(message: types.Message, bot: Bot, state: FSMContext) -> None:
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
     # Only handle photo uploads when user is not inside another FSM flow (manual/AI/etc).
     st = await state.get_state()
     if st != UploadStates.await_file.state:
@@ -4382,6 +4471,8 @@ async def on_photo_upload(message: types.Message, bot: Bot, state: FSMContext) -
 
 @router.message(F.document)
 async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> None:
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
     # Ignore documents while user is in another FSM flow (manual quiz, premium, etc).
     st = await state.get_state()
     if st != UploadStates.await_file.state:
@@ -4463,6 +4554,8 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
             if caption:
                 # title: ...
                 for line in caption.splitlines():
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
                     m = re.match(r"(?is)^\s*(?:title|nom)\s*:\s*(.+)$", line.strip())
                     if m and (m.group(1) or "").strip():
                         title = (m.group(1) or "").strip()[:120]

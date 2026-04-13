@@ -248,9 +248,22 @@ async def main() -> None:
     except Exception as exc:
         logging.warning('Keepalive setup failed: %s', exc)
     try:
-        if str(WEBHOOK_URL or '').strip():
+        force_polling = str(os.getenv('FORCE_POLLING', '') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+        webhook_url = str(WEBHOOK_URL or '').strip()
+        if webhook_url and not (webhook_url.startswith('http://') or webhook_url.startswith('https://')):
+            logging.warning('WEBHOOK_URL is invalid (must start with http/https); falling back to polling')
+            webhook_url = ''
+
+        if (not force_polling) and webhook_url:
             await _run_webhook(bot, dp)
         else:
+            if force_polling and webhook_url:
+                logging.info('FORCE_POLLING is enabled; ignoring WEBHOOK_URL')
+            # Ensure webhook is removed so polling can receive updates.
+            try:
+                await bot.delete_webhook(drop_pending_updates=True)
+            except Exception as exc:
+                logging.warning('delete_webhook failed: %s', exc)
             await _run_polling(bot, dp)
     finally:
         if keepalive_task is not None:

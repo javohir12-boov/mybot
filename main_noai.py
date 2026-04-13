@@ -10,6 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage  # noqa: E402
 
 from config import BOT_TOKEN  # noqa: E402
 from handlers.user import router as user_router  # noqa: E402
+from middlewares.security import SecurityMiddleware  # noqa: E402
 from services.database import init_db  # noqa: E402
 
 
@@ -39,6 +40,14 @@ async def _setup_commands(bot: Bot) -> None:
 async def main() -> None:
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
+    sec = SecurityMiddleware(
+        rate_per_sec=float(os.getenv("RATE_LIMIT_PER_SEC", "1.5") or 1.5),
+        burst=int(os.getenv("RATE_LIMIT_BURST", "6") or 6),
+        block_seconds=int(os.getenv("RATE_LIMIT_BLOCK_SEC", "10") or 10),
+    )
+    dp.message.middleware(sec)
+    dp.callback_query.middleware(sec)
+    dp.poll_answer.middleware(sec)
     await init_db()
     await _setup_commands(bot)
     dp.include_router(user_router)

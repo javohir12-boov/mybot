@@ -246,18 +246,15 @@ class SecurityMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         uid = int(user.id)
+        is_admin = uid in set(ADMIN_IDS or [])
 
-        if uid in set(ADMIN_IDS or []):
-            # Admins are trusted; avoid blocking them by rate limit or channel gate.
-            await self._refresh_user(user)
-            self._gc()
-            return await handler(event, data)
-
-        allowed, wait_sec = self._allow(uid)
-        if not allowed:
-            await self._warn_rate_limited(event, user_id=uid, wait_sec=wait_sec)
-            self._gc()
-            return None
+        # Rate limit: skip for admins, enforce for regular users.
+        if not is_admin:
+            allowed, wait_sec = self._allow(uid)
+            if not allowed:
+                await self._warn_rate_limited(event, user_id=uid, wait_sec=wait_sec)
+                self._gc()
+                return None
 
         await self._refresh_user(user)
 
@@ -265,7 +262,6 @@ class SecurityMiddleware(BaseMiddleware):
         if str(self.required_channel or "").strip():
             # Allow the explicit check callback to pass through.
             if isinstance(event, types.CallbackQuery) and str(getattr(event, "data", "") or "") == "check_sub":
-                # Best-effort refresh of cached subscription state.
                 try:
                     bot = data.get("bot") or getattr(event, "bot", None)
                     if bot is not None:
@@ -278,12 +274,18 @@ class SecurityMiddleware(BaseMiddleware):
                     bot = data.get("bot") or getattr(event, "bot", None)
                 except Exception:
                     bot = None
-                if bot is not None:
-                    subscribed = await self._is_subscribed(bot, uid)
-                    if not subscribed:
-                        await self._prompt_must_join(event, user_id=uid)
-                        self._gc()
-                        return None
+
+                if bot is None:
+                    # Can't validate subscription without bot instance: be safe and block.
+                    await self._prompt_must_join(event, user_id=uid)
+                    self._gc()
+                    return None
+
+                subscribed = await self._is_subscribed(bot, uid)
+                if not subscribed:
+                    await self._prompt_must_join(event, user_id=uid)
+                    self._gc()
+                    return None
 
         self._gc()
         return await handler(event, data)

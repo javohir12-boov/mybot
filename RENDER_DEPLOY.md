@@ -1,4 +1,10 @@
-﻿# Render Deploy (AI Quez Bot)
+# Render Deploy (AI Quez Bot)
+
+## Python versiyasi
+
+- Render default Python juda yangi bo'lib qolsa (masalan 3.14), `asyncpg` buildda xato berishi mumkin.
+- Shu repo ichida `.python-version` va `runtime.txt` bor (3.12). Render 3.12 ishlatishini tekshiring.
+- Agar baribir 3.14 bo'lib ketsa: Render Settings'dan Python 3.12 ni tanlang.
 
 Bu loyiha Render'ga 2 xil usulda deploy qilinadi:
 
@@ -23,6 +29,10 @@ Database:
 - Tavsiya: Render Postgres.
   - Render Postgres yaratib `DATABASE_URL` ni environment'ga qo'ying.
   - Render odatda `postgres://...` beradi. Bizning `config.py` avtomatik `postgresql+asyncpg://...` ga aylantiradi.
+  - Agar sizda `External Database URL` bo'lsa va unda `?sslmode=...` bo'lsa, kod buni qo'llab-quvvatlaydi (asyncpg `sslmode` ni to'g'ridan-to'g'ri qabul qilmaydi, shuning uchun `services/database.py` ichida moslab yuboramiz).
+  - Render ichida deploy qilsangiz, imkon bo'lsa `Internal Database URL` (private) dan foydalaning (tezroq va kamroq muammo).
+  - Eslatma: SQLite'dagi eski ma'lumotlar Postgresga avtomatik ko'chmaydi. Kerak bo'lsa migratsiya skriptini ham qo'shib beraman.
+
 
 ## 2) Polling (Render Web Service) + Health server
 

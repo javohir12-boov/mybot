@@ -205,6 +205,7 @@ async def main() -> None:
     )
     dp.message.middleware(sec)
     dp.callback_query.middleware(sec)
+    dp.poll_answer.middleware(sec)
 
     # Database init (create tables if not exist)
     await init_db()

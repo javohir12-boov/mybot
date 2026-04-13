@@ -6,6 +6,7 @@ from typing import List, Optional
 from sqlalchemy import Boolean, Column, ForeignKey, Integer, Text, desc, func, select
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.engine.url import make_url
 from sqlalchemy.orm import sessionmaker
 from config import DATABASE_URL, SQL_ECHO
 
@@ -117,8 +118,85 @@ class QuizAttempt(Base):
 # --- MODELLAR TUGASHI ---
 
 # Ma'lumotlar bazasiga ulanish sozlamalari (Async)
+
+
+def _asyncpg_ssl_args(sslmode: str) -> dict:
+    """Map libpq-style sslmode to asyncpg ssl context args.
+
+    NOTE: sslmode=require means encrypted transport without certificate verification,
+    which matches libpq behavior. Prefer using internal DB URLs or sslmode=verify-full
+    when possible.
+    """
+
+    mode = str(sslmode or '').strip().lower()
+    if not mode or mode in {'disable', 'off', '0', 'false', 'no'}:
+        return {}
+
+    import ssl
+
+    ctx = ssl.create_default_context()
+
+    if mode in {'require'}:
+        # Encrypt but do not validate cert/hostname (libpq sslmode=require).
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return {'ssl': ctx}
+
+    if mode in {'verify-ca'}:
+        # Validate cert chain, but do not validate hostname.
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        return {'ssl': ctx}
+
+    if mode in {'verify-full'}:
+        # Default context validates both cert and hostname.
+        return {'ssl': ctx}
+
+    return {}
+
+
+def _build_engine():
+    url_raw = str(DATABASE_URL or '').strip()
+    engine_kwargs = {'echo': SQL_ECHO}
+
+    try:
+        url = make_url(url_raw)
+    except Exception:
+        return create_async_engine(url_raw, **engine_kwargs)
+
+    # Postgres asyncpg: handle sslmode=... in query (asyncpg doesn't accept sslmode).
+    if str(getattr(url, 'drivername', '') or '').startswith('postgresql+asyncpg'):
+        q = dict(getattr(url, 'query', {}) or {})
+
+        sslmode = str(os.getenv('DB_SSLMODE', '') or q.pop('sslmode', '') or '').strip()
+        connect_args = {}
+        if sslmode:
+            connect_args.update(_asyncpg_ssl_args(sslmode))
+
+        # Pool tuning for production DBs.
+        try:
+            engine_kwargs['pool_pre_ping'] = True
+            engine_kwargs['pool_size'] = int(os.getenv('DB_POOL_SIZE', '5') or 5)
+            engine_kwargs['max_overflow'] = int(os.getenv('DB_MAX_OVERFLOW', '10') or 10)
+            engine_kwargs['pool_timeout'] = int(os.getenv('DB_POOL_TIMEOUT', '30') or 30)
+        except Exception:
+            pass
+
+        if connect_args:
+            engine_kwargs['connect_args'] = connect_args
+
+        try:
+            url = url.set(query=q)
+        except Exception:
+            pass
+
+        return create_async_engine(url, **engine_kwargs)
+
+    return create_async_engine(url_raw, **engine_kwargs)
+
+
 try:
-    engine = create_async_engine(DATABASE_URL, echo=SQL_ECHO)
+    engine = _build_engine()
 except ModuleNotFoundError as exc:
     missing = getattr(exc, "name", "")
     if str(DATABASE_URL).startswith("mysql+aiomysql://") and missing in {"aiomysql", "pymysql"}:

@@ -1155,8 +1155,6 @@ async def cmd_start_deeplink(
     bot: Bot,
 ) -> None:
     await state.clear()
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-        return
     if message.from_user:
         await get_or_create_user(
             user_id=message.from_user.id,
@@ -1869,8 +1867,6 @@ async def menu_newquiz(call: types.CallbackQuery, state: FSMContext, bot: Bot) -
 
 
 class PremiumStates(StatesGroup):
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-        return
     await_screenshot = State()
 
 
@@ -2086,8 +2082,6 @@ def _is_screenshot_document(message: types.Message) -> bool:
         return False
     name = (doc.file_name or '').lower()
     if any(name.endswith(ext) for ext in ('.jpg', '.jpeg', '.png', '.webp', '.pdf')):
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-        return
         return True
     mt = (doc.mime_type or '').lower()
     return mt.startswith('image/')
@@ -2642,8 +2636,6 @@ async def menu_myquizzes(call: types.CallbackQuery, bot: Bot) -> None:
         )
 
     if len(quizzes) > len(shown):
-    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
-        return
         await call.message.answer(t(ui_lang, "more_quizzes", n=(len(quizzes) - len(shown))))
 
 
@@ -2680,8 +2672,6 @@ async def cmd_mytests(message: types.Message, bot: Bot) -> None:
         )
 
     if len(quizzes) > len(shown):
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-        return
         await message.answer(t(ui_lang, "more_quizzes", n=(len(quizzes) - len(shown))))
 
 
@@ -2710,8 +2700,6 @@ async def cmd_newquiz(message: types.Message, state: FSMContext, bot: Bot) -> No
 
 
 class ManualQuizStates(StatesGroup):
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-        return
     title = State()
     open_period = State()
     question = State()
@@ -3021,8 +3009,6 @@ def _kb_counts(
     elif max_n not in nums and max_n <= 20:
         nums.append(max_n)
     for n in sorted(set(nums)):
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-        return
         kb.button(text=f"{n} ta", callback_data=f"ai_count:{session_id}:{n}")
     if show_pages:
         kb.button(text=t(ui_lang, "btn_pages_optional"), callback_data=f"ai_pages:{session_id}:count")
@@ -4556,8 +4542,6 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
             if caption:
                 # title: ...
                 for line in caption.splitlines():
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-        return
                     m = re.match(r"(?is)^\s*(?:title|nom)\s*:\s*(.+)$", line.strip())
                     if m and (m.group(1) or "").strip():
                         title = (m.group(1) or "").strip()[:120]

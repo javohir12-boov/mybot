@@ -1,9 +1,10 @@
 import json
 import os
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, Text, desc, func, select
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, BigInteger, Text, desc, func, select
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.engine.url import make_url
@@ -15,7 +16,7 @@ Base = declarative_base()
 # --- MODELLAR BOSHLANISHI ---
 class User(Base):
     __tablename__ = 'users'
-    id = Column(Integer, primary_key=True)
+    id = Column(BigInteger, primary_key=True)
     full_name = Column(Text, default="")
     username = Column(Text, default="")
     is_premium = Column(Boolean, default=False)
@@ -26,7 +27,7 @@ class User(Base):
 
 class UserSettings(Base):
     __tablename__ = "user_settings"
-    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+    user_id = Column(BigInteger, ForeignKey("users.id"), primary_key=True)
     # Default output language for AI quizzes: source | uz | ru | en
     default_lang = Column(Text, default="source")
     # UI language for bot messages: uz | ru | en
@@ -34,7 +35,7 @@ class UserSettings(Base):
 
 class FreeTrialQuota(Base):
     __tablename__ = 'free_trial_quotas'
-    user_id = Column(Integer, ForeignKey('users.id'), primary_key=True)
+    user_id = Column(BigInteger, ForeignKey('users.id'), primary_key=True)
     started_at = Column(Text, default='')
     expires_at = Column(Text, default='')  # ISO UTC
     files_total = Column(Integer, default=0)
@@ -45,7 +46,7 @@ class FreeTrialQuota(Base):
 
 class UserQuota(Base):
     __tablename__ = 'user_quotas'
-    user_id = Column(Integer, ForeignKey('users.id'), primary_key=True)
+    user_id = Column(BigInteger, ForeignKey('users.id'), primary_key=True)
     premium_until = Column(Text, default='')  # ISO UTC, e.g. 2026-01-01T00:00:00+00:00
     plan_code = Column(Text, default='')
     files_total = Column(Integer, default=0)
@@ -57,7 +58,7 @@ class UserQuota(Base):
 
 class DailyUsage(Base):
     __tablename__ = 'daily_usage'
-    user_id = Column(Integer, ForeignKey('users.id'), primary_key=True)
+    user_id = Column(BigInteger, ForeignKey('users.id'), primary_key=True)
     day = Column(Text, primary_key=True)  # YYYY-MM-DD (Asia/Tashkent)
     total_used = Column(Integer, default=0)
     files_used = Column(Integer, default=0)
@@ -67,12 +68,12 @@ class DailyUsage(Base):
 class PremiumRequest(Base):
     __tablename__ = 'premium_requests'
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey('users.id'))
+    user_id = Column(BigInteger, ForeignKey('users.id'))
     plan_code = Column(Text, default='')
     status = Column(Text, default='pending')  # pending|approved|rejected
     created_at = Column(Text, default='')
     reviewed_at = Column(Text, default='')
-    reviewed_by = Column(Integer, default=0)
+    reviewed_by = Column(BigInteger, default=0)
     screenshot_file_id = Column(Text, default='')
     screenshot_type = Column(Text, default='')  # photo|document
     ai_verdict = Column(Text, default='')
@@ -80,7 +81,7 @@ class PremiumRequest(Base):
 class Quiz(Base):
     __tablename__ = 'quizzes'
     id = Column(Integer, primary_key=True)
-    creator_id = Column(Integer, ForeignKey('users.id'))
+    creator_id = Column(BigInteger, ForeignKey('users.id'))
     title = Column(Text, default="")
     is_ai_generated = Column(Boolean, default=False)
     open_period = Column(Integer, default=30)  # seconds per question (poll open_period)
@@ -103,7 +104,7 @@ class Question(Base):
 class QuizAttempt(Base):
     __tablename__ = 'quiz_attempts'
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey('users.id'))
+    user_id = Column(BigInteger, ForeignKey('users.id'))
     quiz_id = Column(Integer, ForeignKey('quizzes.id'))
     # "score" kept for backward compatibility (represents correct answers count).
     score = Column(Integer, default=0)
@@ -111,7 +112,7 @@ class QuizAttempt(Base):
     total_time = Column(Integer, default=0)  # seconds
     total_questions = Column(Integer, default=0)
     open_period = Column(Integer, default=0)
-    chat_id = Column(Integer, default=0)
+    chat_id = Column(BigInteger, default=0)
     chat_type = Column(Text, default="")
     finished = Column(Boolean, default=True)
     completed_at = Column(Text, default="")  # ISO timestamp
@@ -416,6 +417,52 @@ async def create_questions_bulk(quiz_id: int, questions: List[dict]) -> int:
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Lightweight migrations for Postgres (handle Telegram IDs > int32).
+        try:
+            if str(engine.url).startswith("postgresql"):
+                # Drop FK constraints that reference users.id so we can alter types.
+                drop_fks = [
+                    "ALTER TABLE user_settings DROP CONSTRAINT IF EXISTS user_settings_user_id_fkey",
+                    "ALTER TABLE free_trial_quotas DROP CONSTRAINT IF EXISTS free_trial_quotas_user_id_fkey",
+                    "ALTER TABLE user_quotas DROP CONSTRAINT IF EXISTS user_quotas_user_id_fkey",
+                    "ALTER TABLE daily_usage DROP CONSTRAINT IF EXISTS daily_usage_user_id_fkey",
+                    "ALTER TABLE premium_requests DROP CONSTRAINT IF EXISTS premium_requests_user_id_fkey",
+                    "ALTER TABLE quizzes DROP CONSTRAINT IF EXISTS quizzes_creator_id_fkey",
+                    "ALTER TABLE quiz_attempts DROP CONSTRAINT IF EXISTS quiz_attempts_user_id_fkey",
+                ]
+                for sql in drop_fks:
+                    await conn.exec_driver_sql(sql)
+
+                # Alter columns to BIGINT.
+                alter_cols = [
+                    "ALTER TABLE users ALTER COLUMN id TYPE BIGINT",
+                    "ALTER TABLE user_settings ALTER COLUMN user_id TYPE BIGINT",
+                    "ALTER TABLE free_trial_quotas ALTER COLUMN user_id TYPE BIGINT",
+                    "ALTER TABLE user_quotas ALTER COLUMN user_id TYPE BIGINT",
+                    "ALTER TABLE daily_usage ALTER COLUMN user_id TYPE BIGINT",
+                    "ALTER TABLE premium_requests ALTER COLUMN user_id TYPE BIGINT",
+                    "ALTER TABLE premium_requests ALTER COLUMN reviewed_by TYPE BIGINT",
+                    "ALTER TABLE quizzes ALTER COLUMN creator_id TYPE BIGINT",
+                    "ALTER TABLE quiz_attempts ALTER COLUMN user_id TYPE BIGINT",
+                    "ALTER TABLE quiz_attempts ALTER COLUMN chat_id TYPE BIGINT",
+                ]
+                for sql in alter_cols:
+                    await conn.exec_driver_sql(sql)
+
+                # Recreate FK constraints.
+                add_fks = [
+                    "ALTER TABLE user_settings ADD CONSTRAINT user_settings_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)",
+                    "ALTER TABLE free_trial_quotas ADD CONSTRAINT free_trial_quotas_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)",
+                    "ALTER TABLE user_quotas ADD CONSTRAINT user_quotas_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)",
+                    "ALTER TABLE daily_usage ADD CONSTRAINT daily_usage_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)",
+                    "ALTER TABLE premium_requests ADD CONSTRAINT premium_requests_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)",
+                    "ALTER TABLE quizzes ADD CONSTRAINT quizzes_creator_id_fkey FOREIGN KEY (creator_id) REFERENCES users(id)",
+                    "ALTER TABLE quiz_attempts ADD CONSTRAINT quiz_attempts_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)",
+                ]
+                for sql in add_fks:
+                    await conn.exec_driver_sql(sql)
+        except Exception as exc:
+            logging.warning("Postgres bigint migration skipped/failed: %s", exc)
         # Lightweight migrations for SQLite (create_all doesn't alter existing tables).
         try:
             if str(engine.url).startswith("sqlite"):

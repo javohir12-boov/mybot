@@ -25,6 +25,7 @@ from services.import_service import import_format_example, parse_quiz_payload
 from services.export_service import ExportServiceError, export_quiz_to_docx, suggest_docx_filename
 from services.database import (
     QuotaExceeded,
+    check_user_quota,
     create_premium_request,
     create_quiz_attempts_bulk,
     create_questions_bulk,
@@ -67,7 +68,7 @@ _PREMIUM_RECEIPT_NOTIFY_ADMINS = str(os.getenv('PREMIUM_RECEIPT_NOTIFY_ADMINS', 
 def _max_upload_mb_for_suffix(suffix: str) -> int:
     s = str(suffix or '').strip().lower()
     if s == '.pptx':
-        return int(os.getenv('MAX_UPLOAD_PPTX_MB', '10') or 10)
+        return int(os.getenv('MAX_UPLOAD_PPTX_MB', '25') or 25)
     return int(os.getenv('MAX_UPLOAD_MB', '5') or 5)
 
 # Premium plans (manual approval via screenshot)
@@ -4085,6 +4086,14 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
     quota_kind = 'topic' if mode == 'topic' else 'file'
     reservation: Optional[dict] = None
 
+    # Pre-check quota without consuming. We only consume after AI returns successfully.
+    try:
+        await check_user_quota(user.id, quota_kind)
+    except QuotaExceeded as exc:
+        await msg.edit_text(_quota_exceeded_text(ui_lang, exc), reply_markup=_kb_premium_plans(ui_lang))
+        await state.clear()
+        return
+
     # Apply optional page-range selection for scanned PDFs (images).
     if image_paths and page_from >= 1 and page_to >= page_from:
         start_i = max(1, page_from)
@@ -4105,7 +4114,6 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
         if image_paths:
             # One question per image (e.g., scanned PDF pages).
             use_paths = [str(p) for p in image_paths[:question_count] if str(p).strip()]
-            reservation = await reserve_user_quota(user.id, quota_kind)
             questions = await ai_service.generate_quiz_from_images(use_paths, output_language=output_language)
             for q, p in zip(questions, use_paths):
                 q["image_path"] = p
@@ -4138,7 +4146,6 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                     raise AIServiceError(f"PDF sahifalaridan matn ajratib bo'lmadi: {exc}") from exc
                 if len(use_text.strip()) < 200:
                     raise AIServiceError("Tanlangan sahifalardan matn topilmadi. Boshqa sahifa oralig'ini tanlang.")
-            reservation = await reserve_user_quota(user.id, quota_kind)
             questions = await ai_service.generate_quiz_from_text(
                 use_text,
                 question_count=question_count,
@@ -4148,13 +4155,14 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
             )
         else:
             use_paths = []
-            reservation = await reserve_user_quota(user.id, quota_kind)
             questions = await ai_service.generate_quiz_from_topic(
                 topic,
                 question_count=question_count,
                 output_language=output_language,
                 difficulty=difficulty,
             )
+
+        reservation = await reserve_user_quota(user.id, quota_kind)
 
         await get_or_create_user(user_id=user.id, full_name=user.full_name, username=getattr(user, "username", None))
         quiz_id = await create_quiz(title=title, creator_id=user.id, is_ai_generated=True, open_period=open_period)

@@ -925,6 +925,92 @@ async def get_user_quota_status(user_id: int) -> dict:
         return out
 
 
+async def check_user_quota(user_id: int, kind: str) -> None:
+    """Check quota availability without consuming it.
+
+    This prevents charging a user when they only open a menu or abandon a flow.
+    Consumption happens via `reserve_user_quota()` after a quiz is successfully generated.
+    """
+
+    user_id = int(user_id or 0)
+    kind = str(kind or '').strip().lower()
+    if kind not in {'file', 'topic'}:
+        raise ValueError('kind must be file|topic')
+
+    if user_id <= 0:
+        raise QuotaExceeded(scope='free', kind=kind, status={})
+
+    trial_files_total, trial_topics_total, trial_days = _trial_defaults()
+
+    async with async_session() as session:
+        # Premium
+        q = await session.get(UserQuota, user_id)
+        if q and _is_premium_active(str(getattr(q, 'premium_until', '') or '')):
+            files_total = int(getattr(q, 'files_total', 0) or 0)
+            files_used = int(getattr(q, 'files_used', 0) or 0)
+            topics_total = int(getattr(q, 'topics_total', 0) or 0)
+            topics_used = int(getattr(q, 'topics_used', 0) or 0)
+
+            if kind == 'file' and files_used >= files_total:
+                raise QuotaExceeded(
+                    scope='premium',
+                    kind=kind,
+                    status={
+                        'premium_until': str(getattr(q, 'premium_until', '') or ''),
+                        'files_left': 0,
+                        'topics_left': max(0, topics_total - topics_used),
+                    },
+                )
+            if kind == 'topic' and topics_used >= topics_total:
+                raise QuotaExceeded(
+                    scope='premium',
+                    kind=kind,
+                    status={
+                        'premium_until': str(getattr(q, 'premium_until', '') or ''),
+                        'files_left': max(0, files_total - files_used),
+                        'topics_left': 0,
+                    },
+                )
+            return
+
+        # Free trial
+        tr = await session.get(FreeTrialQuota, user_id)
+        if tr is None:
+            # Trial will be created on first actual consumption.
+            return
+
+        expires_at = str(getattr(tr, 'expires_at', '') or '')
+        if not _is_trial_active(expires_at):
+            raise QuotaExceeded(scope='free', kind=kind, status={'trial_expired': True, 'trial_until': expires_at})
+
+        files_total = int(getattr(tr, 'files_total', 0) or int(trial_files_total))
+        files_used = int(getattr(tr, 'files_used', 0) or 0)
+        topics_total = int(getattr(tr, 'topics_total', 0) or int(trial_topics_total))
+        topics_used = int(getattr(tr, 'topics_used', 0) or 0)
+
+        if kind == 'file' and files_used >= files_total:
+            raise QuotaExceeded(
+                scope='free',
+                kind=kind,
+                status={
+                    'trial_until': expires_at,
+                    'trial_files_left': 0,
+                    'trial_topics_left': max(0, topics_total - topics_used),
+                },
+            )
+        if kind == 'topic' and topics_used >= topics_total:
+            raise QuotaExceeded(
+                scope='free',
+                kind=kind,
+                status={
+                    'trial_until': expires_at,
+                    'trial_files_left': max(0, files_total - files_used),
+                    'trial_topics_left': 0,
+                },
+            )
+        return
+
+
 async def reserve_user_quota(user_id: int, kind: str) -> dict:
     """Reserve 1 usage for `kind` (file|topic).
 

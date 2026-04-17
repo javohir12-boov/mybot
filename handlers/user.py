@@ -4086,14 +4086,6 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
     quota_kind = 'topic' if mode == 'topic' else 'file'
     reservation: Optional[dict] = None
 
-    # Pre-check quota without consuming. We only consume after AI returns successfully.
-    try:
-        await check_user_quota(user.id, quota_kind)
-    except QuotaExceeded as exc:
-        await msg.edit_text(_quota_exceeded_text(ui_lang, exc), reply_markup=_kb_premium_plans(ui_lang))
-        await state.clear()
-        return
-
     # Apply optional page-range selection for scanned PDFs (images).
     if image_paths and page_from >= 1 and page_to >= page_from:
         start_i = max(1, page_from)
@@ -4106,6 +4098,14 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
     if not text and not image_paths and not topic:
         await state.clear()
         await bot.send_message(chat_id, t(ui_lang, "no_input_for_ai"))
+        return
+
+    # Check quota without consuming. Consume only after AI returns successfully.
+    try:
+        await check_user_quota(user.id, quota_kind)
+    except QuotaExceeded as exc:
+        await state.clear()
+        await bot.send_message(chat_id, _quota_exceeded_text(ui_lang, exc), reply_markup=_kb_premium_plans(ui_lang))
         return
 
     msg = await bot.send_message(chat_id, t(ui_lang, "ai_working"))

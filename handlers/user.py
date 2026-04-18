@@ -40,6 +40,9 @@ from services.database import (
     grant_user_premium,
     list_user_quizzes,
     refund_user_quota,
+    get_referral_status,
+    qualify_referral_if_any,
+    record_referral_invite,
     reserve_user_quota,
     set_premium_request_status,
     set_user_default_lang,
@@ -1104,6 +1107,23 @@ async def _ensure_subscribed(event: object, bot: Bot, user_id: int) -> bool:
 
     ok = await _is_user_subscribed(bot, user_id)
     if ok:
+        # If this user came via a referral link, mark it qualified once they join the required channel.
+        try:
+            info = await qualify_referral_if_any(referred_user_id=user_id)
+            ref_id = int(info.get('referrer_id') or 0)
+            if ref_id > 0 and bool(info.get('qualified')):
+                ui_lang = await _get_ui_lang(ref_id)
+                st = await get_referral_status(ref_id)
+                # Notify referrer in private (best-effort).
+                try:
+                    if bool(info.get('rewarded')):
+                        await bot.send_message(ref_id, t(ui_lang, 'ref_rewarded', files=2, topics=1))
+                    else:
+                        await bot.send_message(ref_id, t(ui_lang, 'ref_progress', n=int(st.get('unrewarded_qualified') or 0), need=3))
+                except Exception:
+                    pass
+        except Exception:
+            pass
         return True
 
     ui_lang = await _get_ui_lang(user_id)
@@ -1165,6 +1185,26 @@ async def cmd_start_deeplink(
         await get_or_create_user_settings(user_id=message.from_user.id)
 
     payload = (command.args or "").strip()
+    # Referral deep link: start=ref_<referrer_id>
+    if payload.startswith('ref_'):
+        try:
+            ref_id = int(re.search(r'\d+', payload).group(0))  # type: ignore[union-attr]
+        except Exception:
+            ref_id = 0
+        if message.from_user and ref_id > 0:
+            try:
+                await record_referral_invite(referrer_id=ref_id, referred_user_id=message.from_user.id)
+            except Exception:
+                pass
+        # Enforce subscription after recording referral.
+        if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+            return
+        # Continue as normal (no special screen).
+        payload = ''
+
+    # Enforce subscription for other deep links.
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+        return
     if payload.startswith("quiz_"):
         raw_id = payload.split("_", 1)[1]
         try:
@@ -1204,8 +1244,6 @@ async def cmd_start_deeplink(
 
 @router.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext, bot: Bot) -> None:
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-        return
     await state.clear()
     if message.from_user:
         await get_or_create_user(
@@ -1914,6 +1952,7 @@ def _kb_premium_plans(ui_lang: str) -> types.InlineKeyboardMarkup:
         if disc:
             btn += f" (-{disc}%)"
         kb.button(text=btn[:64], callback_data=f"prem_buy:{code}")
+    kb.button(text=t(ui_lang, 'btn_referral'), callback_data='prem_ref')
     kb.button(text=t(ui_lang, 'btn_back'), callback_data='prem_back')
     kb.adjust(1)
     return kb.as_markup()
@@ -1982,6 +2021,25 @@ async def menu_premium(call: types.CallbackQuery, bot: Bot) -> None:
     st = await get_user_quota_status(call.from_user.id)
     if call.message:
         await call.message.answer(_premium_menu_text(ui_lang, st), reply_markup=_kb_premium_plans(ui_lang))
+
+
+@router.callback_query(F.data == 'prem_ref')
+async def prem_ref(call: types.CallbackQuery, bot: Bot) -> None:
+    await call.answer()
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    username = await _get_bot_username(bot)
+    link = ''
+    if username:
+        link = f"https://t.me/{username}?start=ref_{call.from_user.id}"
+    st = await get_referral_status(call.from_user.id)
+    total = int(st.get('total') or 0)
+    qualified = int(st.get('qualified') or 0)
+    pending = int(st.get('pending') or 0)
+    unr = int(st.get('unrewarded_qualified') or 0)
+    to_next = int(st.get('to_next_reward') or 3)
+    msg = t(ui_lang, 'ref_info', link=link or '-', total=total, qualified=qualified, pending=pending, unr=unr, to_next=to_next)
+    if call.message:
+        await call.message.answer(msg, disable_web_page_preview=True)
 
 
 @router.callback_query(F.data == 'prem_back')

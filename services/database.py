@@ -78,6 +78,16 @@ class PremiumRequest(Base):
     screenshot_type = Column(Text, default='')  # photo|document
     ai_verdict = Column(Text, default='')
 
+class ReferralInvite(Base):
+    __tablename__ = 'referral_invites'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    referrer_id = Column(BigInteger, ForeignKey('users.id'), index=True)
+    referred_user_id = Column(BigInteger, ForeignKey('users.id'), unique=True, index=True)
+    created_at = Column(Text, default='')
+    qualified_at = Column(Text, default='')
+    rewarded_at = Column(Text, default='')
+
+
 class Quiz(Base):
     __tablename__ = 'quizzes'
     id = Column(Integer, primary_key=True)
@@ -840,6 +850,248 @@ def _is_trial_active(expires_at: str) -> bool:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+# --- Referral -------------------------------------------------------
+
+async def record_referral_invite(*, referrer_id: int, referred_user_id: int) -> bool:
+    """Record that `referred_user_id` came via `referrer_id` deep link.
+
+    Returns True only if a new invite row was created.
+    """
+
+    referrer_id = int(referrer_id or 0)
+    referred_user_id = int(referred_user_id or 0)
+    if referrer_id <= 0 or referred_user_id <= 0:
+        return False
+    if referrer_id == referred_user_id:
+        return False
+
+    now = _utc_now_iso()
+    async with async_session() as session:
+        existing = await session.execute(select(ReferralInvite).where(ReferralInvite.referred_user_id == referred_user_id))
+        row = existing.scalar_one_or_none()
+        if row is not None:
+            return False
+
+        inv = ReferralInvite(
+            referrer_id=referrer_id,
+            referred_user_id=referred_user_id,
+            created_at=now,
+            qualified_at='',
+            rewarded_at='',
+        )
+        session.add(inv)
+        await session.commit()
+        return True
+
+
+async def get_referral_status(user_id: int) -> dict:
+    user_id = int(user_id or 0)
+    if user_id <= 0:
+        return {
+            'total': 0,
+            'qualified': 0,
+            'pending': 0,
+            'rewarded_referrals': 0,
+            'unrewarded_qualified': 0,
+            'to_next_reward': 3,
+        }
+
+    async with async_session() as session:
+        total = await session.execute(select(func.count()).select_from(ReferralInvite).where(ReferralInvite.referrer_id == user_id))
+        total_n = int(total.scalar() or 0)
+
+        qualified = await session.execute(
+            select(func.count()).select_from(ReferralInvite).where(
+                ReferralInvite.referrer_id == user_id,
+                ReferralInvite.qualified_at != '',
+            )
+        )
+        qualified_n = int(qualified.scalar() or 0)
+
+        pending = await session.execute(
+            select(func.count()).select_from(ReferralInvite).where(
+                ReferralInvite.referrer_id == user_id,
+                ReferralInvite.qualified_at == '',
+            )
+        )
+        pending_n = int(pending.scalar() or 0)
+
+        unrewarded = await session.execute(
+            select(func.count()).select_from(ReferralInvite).where(
+                ReferralInvite.referrer_id == user_id,
+                ReferralInvite.qualified_at != '',
+                ReferralInvite.rewarded_at == '',
+            )
+        )
+        unrewarded_n = int(unrewarded.scalar() or 0)
+
+        rewarded = await session.execute(
+            select(func.count()).select_from(ReferralInvite).where(
+                ReferralInvite.referrer_id == user_id,
+                ReferralInvite.rewarded_at != '',
+            )
+        )
+        rewarded_n = int(rewarded.scalar() or 0)
+
+    to_next = 3 - (unrewarded_n % 3) if unrewarded_n % 3 else 0
+    if to_next == 0 and unrewarded_n == 0:
+        to_next = 3
+
+    return {
+        'total': total_n,
+        'qualified': qualified_n,
+        'pending': pending_n,
+        'rewarded_referrals': rewarded_n,
+        'unrewarded_qualified': unrewarded_n,
+        'to_next_reward': int(to_next),
+    }
+
+
+async def _grant_referral_bonus(user_id: int, *, files: int = 2, topics: int = 1) -> None:
+    """Grant referral bonus quotas.
+
+    - If premium is active: increase premium totals (does not extend time).
+    - Otherwise: increase free trial totals and ensure trial is active for at least 1 day.
+    """
+
+    user_id = int(user_id or 0)
+    files = max(0, int(files or 0))
+    topics = max(0, int(topics or 0))
+    if user_id <= 0 or (files == 0 and topics == 0):
+        return
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    trial_files_total, trial_topics_total, trial_days = _trial_defaults()
+    min_trial_days = 1
+
+    async with async_session() as session:
+        q = await session.get(UserQuota, user_id)
+        if q and _is_premium_active(str(getattr(q, 'premium_until', '') or '')):
+            q.files_total = int(getattr(q, 'files_total', 0) or 0) + files
+            q.topics_total = int(getattr(q, 'topics_total', 0) or 0) + topics
+            q.updated_at = _utc_now_iso()
+            session.add(q)
+            await session.commit()
+            return
+
+        tr = await session.get(FreeTrialQuota, user_id)
+        if tr is None:
+            expires = (now + timedelta(days=int(max(min_trial_days, trial_days)))).isoformat()
+            tr = FreeTrialQuota(
+                user_id=user_id,
+                started_at=now.isoformat(),
+                expires_at=expires,
+                files_total=int(trial_files_total),
+                files_used=0,
+                topics_total=int(trial_topics_total),
+                topics_used=0,
+            )
+            session.add(tr)
+            await session.commit()
+            tr = await session.get(FreeTrialQuota, user_id)
+
+        if tr is None:
+            return
+
+        expires_at = str(getattr(tr, 'expires_at', '') or '')
+        # If trial expired, extend it so the user can use the referral bonus.
+        if not _is_trial_active(expires_at):
+            tr.expires_at = (now + timedelta(days=int(min_trial_days))).isoformat()
+            if not str(getattr(tr, 'started_at', '') or '').strip():
+                tr.started_at = now.isoformat()
+
+        tr.files_total = int(getattr(tr, 'files_total', 0) or 0) + files
+        tr.topics_total = int(getattr(tr, 'topics_total', 0) or 0) + topics
+        session.add(tr)
+        await session.commit()
+
+
+async def qualify_referral_if_any(*, referred_user_id: int) -> dict:
+    """Mark referral as qualified for this user (once), and award bonuses per 3 qualified.
+
+    Returns dict with keys:
+    - qualified (bool)
+    - rewarded (bool)
+    - referrer_id (int)
+    - unrewarded_qualified (int)
+    """
+
+    referred_user_id = int(referred_user_id or 0)
+    if referred_user_id <= 0:
+        return {'qualified': False, 'rewarded': False, 'referrer_id': 0, 'unrewarded_qualified': 0}
+
+    now = _utc_now_iso()
+    async with async_session() as session:
+        res = await session.execute(select(ReferralInvite).where(ReferralInvite.referred_user_id == referred_user_id))
+        inv = res.scalar_one_or_none()
+        if inv is None:
+            return {'qualified': False, 'rewarded': False, 'referrer_id': 0, 'unrewarded_qualified': 0}
+
+        if str(getattr(inv, 'qualified_at', '') or '').strip():
+            # Already qualified.
+            ref_id = int(getattr(inv, 'referrer_id', 0) or 0)
+            cnt = await session.execute(
+                select(func.count()).select_from(ReferralInvite).where(
+                    ReferralInvite.referrer_id == ref_id,
+                    ReferralInvite.qualified_at != '',
+                    ReferralInvite.rewarded_at == '',
+                )
+            )
+            return {
+                'qualified': False,
+                'rewarded': False,
+                'referrer_id': ref_id,
+                'unrewarded_qualified': int(cnt.scalar() or 0),
+            }
+
+        inv.qualified_at = now
+        session.add(inv)
+        await session.commit()
+
+        ref_id = int(getattr(inv, 'referrer_id', 0) or 0)
+        if ref_id <= 0:
+            return {'qualified': True, 'rewarded': False, 'referrer_id': 0, 'unrewarded_qualified': 0}
+
+        # Check if we have 3 qualified (unrewarded) referrals to award.
+        q = await session.execute(
+            select(ReferralInvite)
+            .where(
+                ReferralInvite.referrer_id == ref_id,
+                ReferralInvite.qualified_at != '',
+                ReferralInvite.rewarded_at == '',
+            )
+            .order_by(ReferralInvite.qualified_at.asc())
+            .limit(3)
+        )
+        rows = list(q.scalars().all())
+        unrewarded_now = await session.execute(
+            select(func.count()).select_from(ReferralInvite).where(
+                ReferralInvite.referrer_id == ref_id,
+                ReferralInvite.qualified_at != '',
+                ReferralInvite.rewarded_at == '',
+            )
+        )
+        unrewarded_n = int(unrewarded_now.scalar() or 0)
+
+        rewarded = False
+        if len(rows) >= 3:
+            for r in rows:
+                r.rewarded_at = now
+                session.add(r)
+            await session.commit()
+            rewarded = True
+
+    if rewarded:
+        await _grant_referral_bonus(ref_id, files=2, topics=1)
+
+    return {
+        'qualified': True,
+        'rewarded': rewarded,
+        'referrer_id': int(ref_id),
+        'unrewarded_qualified': int(max(0, unrewarded_n - (3 if rewarded else 0))),
+    }
 
 
 async def get_user_quota_status(user_id: int) -> dict:

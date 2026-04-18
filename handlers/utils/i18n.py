@@ -10,6 +10,10 @@ SUPPORTED_UI_LANGS = ('uz', 'ru', 'en', 'de', 'tr', 'kk', 'ar', 'zh', 'ko')
 
 _STRINGS: Dict[str, Dict[str, str]] = {
     'uz': {
+        'ref_rewarded': "Referral bonusi berildi: +{files} ta fayl, +{topics} ta mavzu.",
+        'ref_progress': "Referral: {n}/3 (yana {need} ta kerak).",
+        'ref_info': "Referral havola:\n{link}\n\nHolat:\n- Jami startlar: {total}\n- Kanalga a'zo bo'lganlar: {qualified}\n- Kutilmoqda: {pending}\n\nBonus: 3 ta yangi user kanalga a'zo bo'lsa sizga +2 ta fayl va +1 ta mavzu limiti beriladi.\nKeyingi bonus uchun kerak: {to_next} ta",
+        'btn_referral': "Referral bonus",
         'menu': 'Menyu:',
         'about_menu': 'Menyu:',
         'menu_help': "Menyudagi bo'limlar:\n- Fayl yuklash: fayl yoki elektron kitob yuklash orqali test tuzishingiz mumkin.\n- Mavzu bo'yicha test: mavzuni yozib, qiyinlik/son/vaqtni tanlab test tuzishingiz mumkin.\n- Yangi test: savollarni qo'lda kiritib test tuzishingiz mumkin.\n- Interfeys tili: botning interfeys tilini o'zgartirishingiz mumkin.\n- Premium: limitlarni oshirish va premium olish bo'limi.",
@@ -210,6 +214,10 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         'premium_plan_details': "Tanlangan paket: {plan}\nDavomiylik: {days} kun\nNarx: {price} UZS\nChegirma: -{disc}%\n\nLimit: Fayl {files}, Mavzu {topics}\n\nDavom etish uchun `To'lov qilish` tugmasini bosing.",
     },
     'ru': {
+        'ref_rewarded': "???????? ??????????? ?????: +{files} ??????, +{topics} ???.",
+        'ref_progress': "???????: {n}/3 (????? ??? {need}).",
+        'ref_info': "??????????? ??????:\n{link}\n\n??????:\n- ????? ???????: {total}\n- ??????????? ?? ?????: {qualified}\n- ? ????????: {pending}\n\n?????: ???? 3 ????? ???????????? ?????????? ?? ?????, ?? ???????? +2 ???????? ?????? ? +1 ???? ?? ????.\n?? ?????????? ??????: {to_next}",
+        'btn_referral': "???????",
         'menu': 'Меню:',
         'about_menu': 'Меню:',
         'ui_lang_choose': 'Выберите язык интерфейса:',
@@ -403,6 +411,10 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         'premium_plan_details': 'Выбранный пакет: {plan}\\nДлительность: {days} день\\nЦена: {price} UZS\\nСкидка: -{disc}%\\n\\nЛимиты: Файлы {files}, Темы {topics}\\n\\nНажмите `Оплатить`, чтобы продолжить.',
     },
     'en': {
+        'ref_rewarded': "Referral bonus granted: +{files} files, +{topics} topics.",
+        'ref_progress': "Referral: {n}/3 (need {need} more).",
+        'ref_info': "Referral link:\n{link}\n\nStatus:\n- Total starts: {total}\n- Joined channel: {qualified}\n- Pending: {pending}\n\nBonus: when 3 new users join the channel, you get +2 file uploads and +1 topic quiz.\nTo next bonus: {to_next}",
+        'btn_referral': "Referral",
         'menu': 'Menu:',
         'about_menu': 'Menu:',
         'menu_help': 'Menu sections:\n- Upload file: send a file or an e-book and the bot will create a quiz.\n- Quiz by topic: type a topic, choose difficulty/count/time and get a quiz.\n- New quiz: create a quiz manually by adding questions and options.\n- Interface language: change the language of buttons and messages.\n- Premium: increase limits and manage premium access.',

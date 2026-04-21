@@ -1,6 +1,7 @@
 ﻿import asyncio
 import json
 import os
+import math
 import random
 import re
 from dataclasses import dataclass
@@ -801,42 +802,63 @@ class AIService:
             seen.add(key)
             uniq.append(q)
 
-        max_retries = int(os.getenv("AI_FILL_RETRIES", "2"))
-        max_retries = max(0, min(5, max_retries))
-        max_iters = max_retries + (question_count + batch_size - 1) // batch_size
+        max_retries = int(os.getenv("AI_FILL_RETRIES", "4") or 4)
+        max_retries = max(0, min(8, max_retries))
+        max_iters = max(
+            max_retries + (question_count + batch_size - 1) // batch_size,
+            (question_count * 2 + batch_size - 1) // batch_size,
+        )
         tries = 0
         while len(uniq) < question_count and tries < max_iters:
             tries += 1
             remaining = question_count - len(uniq)
-            ask = min(remaining, batch_size)
+            if remaining <= 0:
+                break
+
+            parallel = int(os.getenv("AI_PARALLEL_BATCHES", "2") or 2)
+            parallel = max(1, min(5, parallel))
+
             avoid = "\n".join(f"- {q['question']}" for q in uniq[:12] if q.get("question"))
             extra = "Quyidagi savollarni takrorlamang:\n" + avoid if avoid else ""
-
             if diff_extra_topic:
                 extra = (diff_extra_topic + ("\n\n" + extra if extra else "")).strip()
 
-            if provider == "openai":
-                more = await self._generate_openai_topic(
-                    topic,
-                    ask,
-                    lang_instruction=lang_instruction,
-                    extra_instructions=extra,
-                )
-            else:
-                more = await self._generate_gemini_topic(
-                    topic,
-                    ask,
-                    lang_instruction=lang_instruction,
-                    extra_instructions=extra,
-                )
+            tasks = []
+            to_ask = remaining
+            for _ in range(parallel):
+                if to_ask <= 0:
+                    break
+                ask = min(to_ask, batch_size)
+                to_ask -= ask
+                if provider == "openai":
+                    tasks.append(
+                        self._generate_openai_topic(
+                            topic,
+                            ask,
+                            lang_instruction=lang_instruction,
+                            extra_instructions=extra,
+                        )
+                    )
+                else:
+                    tasks.append(
+                        self._generate_gemini_topic(
+                            topic,
+                            ask,
+                            lang_instruction=lang_instruction,
+                            extra_instructions=extra,
+                        )
+                    )
 
-            for q in more:
-                key = str(q.get("question") or "").strip().lower()
-                if not key or key in seen:
-                    continue
-                seen.add(key)
-                uniq.append(q)
-
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for res in results:
+                if isinstance(res, Exception):
+                    raise res
+                for q in res:
+                    key = str(q.get("question") or "").strip().lower()
+                    if not key or key in seen:
+                        continue
+                    seen.add(key)
+                    uniq.append(q)
         return uniq[:question_count]
 
     async def generate_quiz_from_images(
@@ -1178,24 +1200,23 @@ class AIService:
         total_timeout = float(os.getenv("OPENAI_TOTAL_TIMEOUT_SEC", "0") or 0)
         if total_timeout <= 0:
             total_timeout = min(900.0, timeout_sec + 30.0)
-
-        system_prompt = (
-            "Sen professional testologsan. Berilgan MAVZU bo'yicha ko'p tanlovli test yarat.\n"
-            f"- Savollar soni: {question_count}\n"
-            "- Har savolda 4 ta variant bo'lsin\n"
-            "- Variantlar bir xil uslubda bo'lsin (hammasi ibora yoki hammasi 1 gap)\n"
-            "- Variantlar uzunligi bir-biriga yaqin bo'lsin: eng uzun va eng qisqa variant farqi 2-3 so'zdan oshmasin\n"
-            "- Juda qisqa (1-2 so'zli) va juda uzun variantlardan qoching; har bir variant taxminan 4-10 so'z bo'lsin\n"
-            "- Variantlarda izoh/tushuntirish bo'lmasin; izoh faqat explanation ga yozilsin\n"
-            "- Noto'g'ri variantlar ham mantiqan ishonarli bo'lsin, to'g'ri javob ko'zga tashlanib qolmasin\n"
-            "- correct_index 0..3 bo'lsin\n"
-            "- explanation qisqa bo'lsin\n"
-            ""
-            f"- Til: {lang_instruction}\n"
-            "Natijani faqat JSON ko'rinishida qaytar: {\"quiz\": [...]}.\n"
-            "Har element: {\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], "
-            "\"correct_index\": 0, \"explanation\": \"...\"}"
-        )
+        system_prompt = f"""Sen professional testologsan. Berilgan MAVZU bo'yicha ko'p tanlovli test yarat.
+- Savollar soni: {question_count}
+- Mavzuni KENG qamrab ol: asosiy tushunchalar, sabab-oqibat, taqqoslash, amaliy qo'llanish, tipik xatolar, terminlar/ta'riflar, klassifikatsiya (mavzuga mos bo'lsa).
+- Savollar bir xil qolipda bo'lmasin: savolning boshlanishi va uslubi turlicha bo'lsin (hammasi bir xil so'z bilan boshlanmasin).
+- Mavzu so'zi bilan har doim boshlamang. (Masalan, 'Olma ...' deb ketma-ket boshlamang.)
+- Har savolda 4 ta variant bo'lsin
+- Variantlar bir xil uslubda bo'lsin (hammasi ibora yoki hammasi 1 gap)
+- Variantlar uzunligi bir-biriga yaqin bo'lsin: eng uzun va eng qisqa variant farqi 2-3 so'zdan oshmasin
+- Juda qisqa (1-2 so'zli) va juda uzun variantlardan qoching; har bir variant taxminan 4-10 so'z bo'lsin
+- Variantlarda izoh/tushuntirish bo'lmasin; izoh faqat explanation ga yozilsin
+- Noto'g'ri variantlar ham mantiqan ishonarli bo'lsin, to'g'ri javob ko'zga tashlanib qolmasin
+- correct_index 0..3 bo'lsin
+- explanation qisqa bo'lsin
+- Til: {lang_instruction}
+- Muhim: EXACTLY shu miqdorda savol qaytar (ro'yxat uzunligi aynan Savollar soni bo'lsin).
+Natijani faqat JSON ko'rinishida qaytar: {{\"quiz\": [...]}}.
+Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"correct_index\": 0, \"explanation\": \"...\"}}"""
 
         user_prompt = f"{extra_instructions}\n\nMavzu: {topic}".strip()
 
@@ -1207,7 +1228,7 @@ class AIService:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    temperature=0.2,
+                    temperature=topic_temp,
                     response_format={"type": "json_object"},
                 ),
                 timeout=total_timeout,

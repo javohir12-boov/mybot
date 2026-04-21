@@ -1348,6 +1348,10 @@ class AIService:
         system_prompt = f"""Sen professional testologsan. Berilgan MAVZU bo'yicha ko'p tanlovli test yarat.
 - Savollar soni: {question_count}
 - Mavzuni KENG qamrab ol: asosiy tushunchalar, sabab-oqibat, taqqoslash, amaliy qo'llanish, tipik xatolar, terminlar/ta'riflar, klassifikatsiya (mavzuga mos bo'lsa).
+- Agar mavzu kitob/roman/film/spektakl nomi bo'lsa: syujet, qahramonlar, voqealar ketma-ketligi, konflikt, mavzular (tema), muallif/yaratuvchi, davr/kontekst, ramzlar bo'yicha savollar tuz.
+- Agar mavzu ibora/metafora bo'lsa: ma'nosi, ishlatilish konteksti, to'g'ri/noto'g'ri talqinlar, sinonim/antonim, misollar bo'yicha savollar tuz.
+- Juda yuzaki savollardan qoching (masalan: "nimadan yasaladi?", "qanday hosil bo'ladi?" kabi mavzuga aloqasiz yoki bolalarcha savollar).
+- Agar aniq faktga ishonching komil bo'lmasa, u faktga asoslangan savol tuzma.
 - Savollar bir xil qolipda bo'lmasin: savolning boshlanishi va uslubi turlicha bo'lsin (hammasi bir xil so'z bilan boshlanmasin).
 - Mavzu so'zi bilan har doim boshlamang. (Masalan, 'Olma ...' deb ketma-ket boshlamang.)
 - Har savolda 4 ta variant bo'lsin
@@ -1558,6 +1562,10 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
         prompt = (
             "Sen professional testologsan. Berilgan MAVZU bo'yicha ko'p tanlovli test yarat.\n"
             f"- Savollar soni: {question_count}\n"
+            "- Agar mavzu kitob/roman/film/spektakl nomi bo'lsa: syujet, qahramonlar, voqealar ketma-ketligi, konflikt, mavzular (tema), muallif/yaratuvchi, davr/kontekst, ramzlar bo'yicha savollar tuz.\n"
+            "- Agar mavzu ibora/metafora bo'lsa: ma'nosi, ishlatilish konteksti, to'g'ri/noto'g'ri talqinlar, sinonim/antonim, misollar bo'yicha savollar tuz.\n"
+            "- Juda yuzaki savollardan qoching (masalan: \"nimadan yasaladi?\", \"qanday hosil bo'ladi?\" kabi mavzuga aloqasiz savollar).\n"
+            "- Agar aniq faktga ishonching komil bo'lmasa, u faktga asoslangan savol tuzma.\n"
             "- Har savolda 4 ta variant bo'lsin\n"
             "- Variantlar bir xil uslubda bo'lsin (hammasi ibora yoki hammasi 1 gap)\n"
             "- Variantlar uzunligi bir-biriga yaqin bo'lsin: eng uzun va eng qisqa variant farqi 2-3 so'zdan oshmasin\n"

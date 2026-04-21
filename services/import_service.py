@@ -8,8 +8,16 @@ class ImportServiceError(RuntimeError):
     pass
 
 
-_Q_START_RE = re.compile(r"^\s*(?:Q(?:uestion)?\s*)?(\d{1,3})\s*[).:\-]\s*(.+?)\s*$", re.IGNORECASE)
-_OPT_RE = re.compile(r"^\s*(?:[-*\u2022\u25CF\u25E6\u2013\u2014]\s*)?([A-Da-d\u0410\u0430\u0411\u0431\u0412\u0432\u0413\u0433\u0421\u0441\u0414\u0434])\s*[\).:\-\u2013\u2014]\s*(.+?)\s*$", re.IGNORECASE)
+_Q_START_RE = re.compile(r"^\s*(?:Q(?:uestion)?\s*)?(\d{1,4})\s*[).:\-\u2013\u2014]\s*(.+?)\s*$", re.IGNORECASE)
+_Q_NUM_ONLY_RE = re.compile(r"^\s*(?:Q(?:uestion)?\s*)?(\d{1,4})\s*[).:\-\u2013\u2014]\s*$", re.IGNORECASE)
+_OPT_RE = re.compile(
+    r"^\s*(?:[-*\u2022\u25CF\u25E6\u2013\u2014]\s*)?([A-Da-d\u0410\u0430\u0411\u0431\u0412\u0432\u0413\u0433\u0421\u0441\u0414\u0434]|[1-4])\s*[\).:\-\u2013\u2014]\s*(.+?)\s*$",
+    re.IGNORECASE,
+)
+_OPT_KEY_ONLY_RE = re.compile(
+    r"^\s*(?:[-*\u2022\u25CF\u25E6\u2013\u2014]\s*)?([A-Da-d\u0410\u0430\u0411\u0431\u0412\u0432\u0413\u0433\u0421\u0441\u0414\u0434]|[1-4])\s*[\).:\-\u2013\u2014]\s*$",
+    re.IGNORECASE,
+)
 _ANSWER_RE = re.compile(
     r"^\s*(?:answer|ans|javob|to'g'ri\s*j?avob|correct(?:\s*answer)?|\u043E\u0442\u0432\u0435\u0442|\u043F\u0440\u0430\u0432\u0438\u043B\u044C\u043D(?:\u044B\u0439|\u0430\u044F|\u043E\u0435|\u044B\u0435)?\s*\u043E\u0442\u0432\u0435\u0442)\s*(?:[:\-=]|\s)\s*([A-Da-d\u0410\u0430\u0411\u0431\u0412\u0432\u0413\u0433\u0421\u0441\u0414\u0434]|[1-4])\b.*$",
     re.IGNORECASE,
@@ -17,8 +25,10 @@ _ANSWER_RE = re.compile(
 _EXPL_RE = re.compile(r"^\s*(?:explanation|izoh)\s*[:\-]\s*(.+?)\s*$", re.IGNORECASE)
 
 _ANSWER_SECTION_RE = re.compile(r"(?i)^\s*(?:answers|answer\s*key|javoblar|javoblari|kalit|\u043E\u0442\u0432\u0435\u0442\u044B)\b")
-_ANSWER_PAIR_RE = re.compile(r"(?i)\b(\d{1,3})\s*[\).:\-]\s*([A-Da-d\u0410\u0430\u0411\u0431\u0412\u0432\u0413\u0433\u0421\u0441\u0414\u0434]|[1-4])\b")
-_ANSWER_PAIR_COMPACT_RE = re.compile(r"(?i)\b(\d{1,3})\s*([A-Da-d\u0410\u0430\u0411\u0431\u0412\u0432\u0413\u0433\u0421\u0441\u0414\u0434])\b")
+_ANSWER_PAIR_RE = re.compile(
+    r"(?i)\b(\d{1,4})\s*[\).:\-\u2013\u2014]\s*([A-Da-d\u0410\u0430\u0411\u0431\u0412\u0432\u0413\u0433\u0421\u0441\u0414\u0434]|[1-4])\b"
+)
+_ANSWER_PAIR_COMPACT_RE = re.compile(r"(?i)\b(\d{1,4})\s*([A-Da-d\u0410\u0430\u0411\u0431\u0412\u0432\u0413\u0433\u0421\u0441\u0414\u0434])\b")
 
 _CYR_MAP = {
     "\u0410": "A",
@@ -62,6 +72,14 @@ def _opt_key(token: str) -> Optional[str]:
     t = re.sub(r"[\s\(\)\[\]\{\}\.\-:]+", "", t)
     if t in _CYR_MAP:
         t = _CYR_MAP[t]
+    # Allow numeric option labels: 1..4 -> A..D
+    if t.isdigit():
+        try:
+            n = int(t)
+        except Exception:
+            n = 0
+        if 1 <= n <= 4:
+            return chr(ord("A") + (n - 1))
     c = (t.upper() or "")[:1]
     c = _CYR_MAP.get(c, c)
     if c in {"A", "B", "C", "D"}:
@@ -70,29 +88,43 @@ def _opt_key(token: str) -> Optional[str]:
 
 
 def _strip_correct_marker(text: str) -> tuple[str, bool]:
-    """Detect simple 'correct option' markers inside option text."""
+    """Detect simple "correct option" markers inside option text."""
     v = str(text or "").strip()
     if not v:
         return v, False
 
     marked = False
-    # Leading markers: "*", "вњ”", "вњ…"
-    while v and v[0] in {"*", "вњ”", "вњ…", "вњ“"}:
-        marked = True
-        v = v[1:].lstrip()
-    # Trailing marker: "*"
-    if v.endswith("*") and len(v) > 1:
-        marked = True
-        v = v[:-1].rstrip()
+    marker_tokens = (
+        "*",
+        "☑️",
+        "✅",
+        "✔",
+        "✓",
+        "☑",
+        "???",
+        "???",
+        "???",
+    )
 
-    # Parenthetical words (keep it conservative).
-    if re.search(r"(?i)\b(correct|to['’]g['’]ri|РїСЂР°РІРёР»СЊРЅ)\b", v):
+    while v and any(v.startswith(m) for m in marker_tokens):
         marked = True
-        v = re.sub(r"(?i)\b(correct|to['’]g['’]ri|РїСЂР°РІРёР»СЊРЅ(?:С‹Р№|Р°СЏ)?)\b", "", v).strip(" -:()")
+        for m in marker_tokens:
+            if v.startswith(m):
+                v = v[len(m):].lstrip()
+                break
+
+    while len(v) > 1 and any(v.endswith(m) for m in marker_tokens):
+        marked = True
+        for m in marker_tokens:
+            if v.endswith(m):
+                v = v[:-len(m)].rstrip()
+                break
+
+    if re.search(r"(?i)\b(correct|to['?]g['?]ri)\b", v):
+        marked = True
+        v = re.sub(r"(?i)\b(correct|to['?]g['?]ri)\b", "", v).strip(" -:()")
 
     return v, marked
-
-
 def _normalize_question(q: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     text = str(q.get("question") or q.get("text") or "").strip()
     options = q.get("options") or q.get("variants") or []
@@ -168,9 +200,11 @@ def parse_quiz_from_text(text: str) -> List[Dict[str, Any]]:
     correct: Optional[int] = None
     expl: str = ""
     last_opt: Optional[str] = None
+    pending_question_num: Optional[int] = None
+    pending_option_key: Optional[str] = None
 
     def _flush() -> None:
-        nonlocal cur_num, cur_q, opts, correct, expl, last_opt
+        nonlocal cur_num, cur_q, opts, correct, expl, last_opt, pending_question_num, pending_option_key
         if not cur_q:
             cur_num = None
             cur_q = None
@@ -178,6 +212,8 @@ def parse_quiz_from_text(text: str) -> List[Dict[str, Any]]:
             correct = None
             expl = ""
             last_opt = None
+            pending_question_num = None
+            pending_option_key = None
             return
         if len(opts) != 4:
             cur_num = None
@@ -186,6 +222,8 @@ def parse_quiz_from_text(text: str) -> List[Dict[str, Any]]:
             correct = None
             expl = ""
             last_opt = None
+            pending_question_num = None
+            pending_option_key = None
             return
         ordered = [opts.get("A", ""), opts.get("B", ""), opts.get("C", ""), opts.get("D", "")]
         if any(not x for x in ordered):
@@ -195,6 +233,8 @@ def parse_quiz_from_text(text: str) -> List[Dict[str, Any]]:
             correct = None
             expl = ""
             last_opt = None
+            pending_question_num = None
+            pending_option_key = None
             return
         out_raw.append(
             {
@@ -211,6 +251,8 @@ def parse_quiz_from_text(text: str) -> List[Dict[str, Any]]:
         correct = None
         expl = ""
         last_opt = None
+        pending_question_num = None
+        pending_option_key = None
 
     for raw in lines:
         line = (raw or "").strip()
@@ -233,6 +275,21 @@ def parse_quiz_from_text(text: str) -> List[Dict[str, Any]]:
             cur_q = (m_q.group(2) or "").strip()
             continue
 
+        m_q_only = _Q_NUM_ONLY_RE.match(line)
+        if m_q_only:
+            _flush()
+            try:
+                pending_question_num = int(m_q_only.group(1))
+            except Exception:
+                pending_question_num = None
+            continue
+
+        if pending_question_num is not None and not cur_q:
+            cur_num = pending_question_num
+            cur_q = line
+            pending_question_num = None
+            continue
+
         m_opt = _OPT_RE.match(line)
         if m_opt and cur_q:
             key = _opt_key(m_opt.group(1) or "")
@@ -246,6 +303,24 @@ def parse_quiz_from_text(text: str) -> List[Dict[str, Any]]:
                 last_opt = key
                 if marked and correct is None:
                     correct = ord(key) - ord("A")
+            continue
+
+        m_opt_only = _OPT_KEY_ONLY_RE.match(line)
+        if m_opt_only and cur_q:
+            pending_option_key = _opt_key(m_opt_only.group(1) or "")
+            continue
+
+        if pending_option_key and cur_q:
+            val, marked = _strip_correct_marker(line)
+            if val:
+                if pending_option_key in opts:
+                    opts[pending_option_key] = (opts[pending_option_key] + " " + val).strip()
+                else:
+                    opts[pending_option_key] = val
+                last_opt = pending_option_key
+                if marked and correct is None:
+                    correct = ord(pending_option_key) - ord("A")
+            pending_option_key = None
             continue
 
         m_ans = _ANSWER_RE.match(line)
@@ -265,7 +340,18 @@ def parse_quiz_from_text(text: str) -> List[Dict[str, Any]]:
 
         # Multi-line option text (PDF/DOCX extraction often wraps).
         if cur_q and opts and last_opt:
-            opts[last_opt] = (opts.get(last_opt, "") + " " + line).strip()
+            val, marked = _strip_correct_marker(line)
+            if val:
+                opts[last_opt] = (opts.get(last_opt, "") + " " + val).strip()
+            if marked and correct is None:
+                correct = ord(last_opt) - ord("A")
+            continue
+
+        # Some documents place the checkmark on a separate line right after the option.
+        if cur_q and last_opt and line in {"?", "?", "?", "?", "??", "???", "???", "???"}:
+            if correct is None:
+                correct = ord(last_opt) - ord("A")
+            continue
 
     _flush()
 

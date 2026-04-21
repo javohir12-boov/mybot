@@ -5,6 +5,7 @@ import re
 import shutil
 import time
 import uuid
+from contextlib import suppress
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,15 +22,18 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import AI_ENABLED, ADMIN_IDS, REQUIRED_CHANNEL, get_about_text
 from handlers.utils.i18n import lang_name, norm_ui_lang, t
 from services.ai_service import AIService, AIServiceError, extract_text_from_file
+from services.topic_context_service import fetch_topic_context
 from services.import_service import import_format_example, parse_quiz_payload
 from services.export_service import ExportServiceError, export_quiz_to_docx, suggest_docx_filename
 from services.database import (
     QuotaExceeded,
     check_user_quota,
+    clear_manual_quiz_draft,
     create_premium_request,
     create_quiz_attempts_bulk,
     create_questions_bulk,
     create_quiz,
+    get_manual_quiz_draft,
     get_or_create_user,
     get_or_create_user_settings,
     get_premium_request,
@@ -47,6 +51,7 @@ from services.database import (
     set_premium_request_status,
     set_user_default_lang,
     set_user_ui_lang,
+    upsert_manual_quiz_draft,
     update_quiz_meta,
 )
 
@@ -1946,9 +1951,21 @@ async def menu_newquiz(call: types.CallbackQuery, state: FSMContext, bot: Bot) -
     await call.answer()
     await state.clear()
     ui_lang = await _get_ui_lang(call.from_user.id)
+    draft = await get_manual_quiz_draft(user_id=call.from_user.id)
+    if draft and str(draft.get("state") or "").strip():
+        if call.message:
+            await call.message.answer(
+                t(ui_lang, "manual_draft_found"),
+                reply_markup=_kb_manual_draft_choice(ui_lang=ui_lang),
+            )
+        else:
+            await call.answer(t(ui_lang, "manual_draft_found"), show_alert=True)
+        return
+
     await state.update_data(m_ui_lang=ui_lang)
     await state.set_state(ManualQuizStates.title)
     if call.message:
+        await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
         await call.message.answer(t(ui_lang, "manual_title_prompt"))
 
 
@@ -2791,6 +2808,7 @@ async def menu_cancel(call: types.CallbackQuery, state: FSMContext, bot: Bot) ->
     chat_id = call.message.chat.id if call.message else 0
     cancelled = await _cancel_user_runs(bot, chat_id=chat_id, user_id=call.from_user.id)
     await state.clear()
+    await clear_manual_quiz_draft(user_id=call.from_user.id)
     if call.message:
         ui_lang = await _get_ui_lang(call.from_user.id)
         await call.message.answer(t(ui_lang, "stopped_n", n=cancelled))
@@ -2802,8 +2820,15 @@ async def cmd_newquiz(message: types.Message, state: FSMContext, bot: Bot) -> No
         return
     await state.clear()
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
+
+    draft = await get_manual_quiz_draft(user_id=message.from_user.id if message.from_user else 0)
+    if draft and str(draft.get("state") or "").strip():
+        await message.answer(t(ui_lang, "manual_draft_found"), reply_markup=_kb_manual_draft_choice(ui_lang=ui_lang))
+        return
+
     await state.update_data(m_ui_lang=ui_lang)
     await state.set_state(ManualQuizStates.title)
+    await _persist_manual_draft(state, user_id=message.from_user.id if message.from_user else 0, chat_id=message.chat.id)
     await message.answer(t(ui_lang, "manual_title_prompt"))
 
 
@@ -2815,6 +2840,140 @@ class ManualQuizStates(StatesGroup):
     options = State()
     choose_correct = State()
 
+
+def _kb_manual_draft_choice(*, ui_lang: str) -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(ui_lang, "btn_manual_continue"), callback_data="m_draft:resume")
+    kb.button(text=t(ui_lang, "btn_manual_restart"), callback_data="m_draft:restart")
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def _manual_prompt_for_state(*, ui_lang: str, state_str: str, data: Dict[str, Any]) -> tuple[str, Optional[types.InlineKeyboardMarkup]]:
+    ui_lang = norm_ui_lang(ui_lang)
+    st = str(state_str or "").strip()
+
+    if st == ManualQuizStates.title.state or st.endswith(":title"):
+        return t(ui_lang, "manual_title_prompt"), None
+    if st == ManualQuizStates.open_period.state or st.endswith(":open_period"):
+        return t(ui_lang, "choose_time"), None
+    if st == ManualQuizStates.question.state or st.endswith(":question"):
+        questions = data.get("questions") or []
+        if isinstance(questions, list) and len(questions) > 0:
+            return t(ui_lang, "manual_next_question"), None
+        return t(ui_lang, "manual_first_question"), None
+    if st == ManualQuizStates.question_image.state or st.endswith(":question_image"):
+        return t(ui_lang, "manual_has_image"), None
+    if st == ManualQuizStates.options.state or st.endswith(":options"):
+        return t(ui_lang, "manual_send_4_options"), None
+    if st == ManualQuizStates.choose_correct.state or st.endswith(":choose_correct"):
+        q = str(data.get("current_question") or "").strip()
+        opts = data.get("current_options") or []
+        if not q or not (isinstance(opts, list) and len(opts) == 4):
+            questions = data.get("questions") or []
+            n = len(questions) if isinstance(questions, list) else 0
+            kb2 = InlineKeyboardBuilder()
+            kb2.button(text=t(ui_lang, "btn_manual_add_more"), callback_data="m_add_more")
+            kb2.button(text=t(ui_lang, "btn_manual_finish"), callback_data="m_finish")
+            kb2.adjust(2)
+            return t(ui_lang, "manual_saved_total", n=n), kb2.as_markup()
+
+        kb = InlineKeyboardBuilder()
+        for i in range(4):
+            kb.button(text=str(i + 1), callback_data=f"m_correct:{i}")
+        kb.adjust(2)
+
+        lines: List[str] = []
+        if q:
+            lines.append(q)
+        if isinstance(opts, list) and opts:
+            for i, o in enumerate(opts[:4], start=1):
+                lines.append(f"{i}) {str(o).strip()}")
+        lines.append(t(ui_lang, "manual_choose_correct"))
+        return "\n".join([x for x in lines if x]), kb.as_markup()
+
+    return t(ui_lang, "manual_title_prompt"), None
+
+
+def _manual_draft_payload(data: Dict[str, Any]) -> Dict[str, Any]:
+    allow = {
+        "m_ui_lang",
+        "title",
+        "m_open_period",
+        "questions",
+        "current_question",
+        "current_options",
+        "current_image_file_id",
+    }
+    out: Dict[str, Any] = {}
+    for k in allow:
+        if k in data:
+            out[k] = data.get(k)
+    return out
+
+
+async def _persist_manual_draft(state: FSMContext, *, user_id: int, chat_id: int) -> None:
+    try:
+        st = await state.get_state()
+        if not st or not str(st).startswith("ManualQuizStates:"):
+            return
+        data = await state.get_data()
+        await upsert_manual_quiz_draft(
+            user_id=int(user_id or 0),
+            chat_id=int(chat_id or 0),
+            state=str(st),
+            data=_manual_draft_payload(data if isinstance(data, dict) else {}),
+        )
+    except Exception:
+        # Best-effort only.
+        return
+
+
+@router.callback_query(F.data == "m_draft:restart")
+async def manual_draft_restart(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    await clear_manual_quiz_draft(user_id=call.from_user.id)
+    await state.clear()
+    await state.update_data(m_ui_lang=ui_lang)
+    await state.set_state(ManualQuizStates.title)
+    if call.message:
+        await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
+        await call.message.answer(t(ui_lang, "manual_title_prompt"))
+
+
+@router.callback_query(F.data == "m_draft:resume")
+async def manual_draft_resume(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    draft = await get_manual_quiz_draft(user_id=call.from_user.id)
+    ui_lang = await _get_ui_lang(call.from_user.id)
+
+    if not draft or not str(draft.get("state") or "").strip():
+        await state.clear()
+        await state.update_data(m_ui_lang=ui_lang)
+        await state.set_state(ManualQuizStates.title)
+        if call.message:
+            await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
+            await call.message.answer(t(ui_lang, "manual_title_prompt"))
+        return
+
+    data = draft.get("data") or {}
+    if not isinstance(data, dict):
+        data = {}
+    ui_lang = norm_ui_lang(str(data.get("m_ui_lang") or ui_lang))
+
+    st = str(draft.get("state") or "").strip()
+    if not st.startswith("ManualQuizStates:"):
+        st = ManualQuizStates.title.state
+
+    await state.clear()
+    await state.update_data(**data, m_ui_lang=ui_lang)
+    await state.set_state(st)
+    if call.message:
+        await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
+        prompt, markup = _manual_prompt_for_state(ui_lang=ui_lang, state_str=st, data=data)
+        await call.message.answer(prompt, reply_markup=markup)
 
 @router.message(ManualQuizStates.title)
 async def manual_title(message: types.Message, state: FSMContext) -> None:
@@ -2829,6 +2988,7 @@ async def manual_title(message: types.Message, state: FSMContext) -> None:
 
     await state.update_data(title=title, questions=[], m_open_period=None)
     await state.set_state(ManualQuizStates.open_period)
+    await _persist_manual_draft(state, user_id=message.from_user.id if message.from_user else 0, chat_id=message.chat.id)
     await message.answer(t(ui_lang, "choose_time"))
 
 
@@ -2844,6 +3004,7 @@ async def manual_open_period(message: types.Message, state: FSMContext) -> None:
         return
     await state.update_data(m_open_period=int(sec))
     await state.set_state(ManualQuizStates.question)
+    await _persist_manual_draft(state, user_id=message.from_user.id if message.from_user else 0, chat_id=message.chat.id)
     await message.answer(t(ui_lang, "manual_first_question"))
 
 
@@ -2867,6 +3028,7 @@ async def manual_question_photo(message: types.Message, state: FSMContext) -> No
     q_text = caption or t(ui_lang, "image_question")
     await state.update_data(current_question=q_text, current_image_file_id=photo.file_id)
     await state.set_state(ManualQuizStates.options)
+    await _persist_manual_draft(state, user_id=message.from_user.id if message.from_user else 0, chat_id=message.chat.id)
     await message.answer(t(ui_lang, "manual_send_4_options"))
 
 
@@ -2882,6 +3044,7 @@ async def manual_question_doc_image(message: types.Message, state: FSMContext) -
     q_text = caption or t(ui_lang, "image_question")
     await state.update_data(current_question=q_text, current_image_file_id=doc.file_id)
     await state.set_state(ManualQuizStates.options)
+    await _persist_manual_draft(state, user_id=message.from_user.id if message.from_user else 0, chat_id=message.chat.id)
     await message.answer(t(ui_lang, "manual_send_4_options"))
 
 
@@ -2896,6 +3059,7 @@ async def manual_question_text(message: types.Message, state: FSMContext) -> Non
 
     await state.update_data(current_question=text, current_image_file_id="")
     await state.set_state(ManualQuizStates.question_image)
+    await _persist_manual_draft(state, user_id=message.from_user.id if message.from_user else 0, chat_id=message.chat.id)
     await message.answer(t(ui_lang, "manual_has_image"))
 
 
@@ -2905,6 +3069,7 @@ async def manual_question_image_skip(message: types.Message, state: FSMContext) 
     ui_lang = norm_ui_lang(str(data.get("m_ui_lang") or ""))
     await state.update_data(current_image_file_id="")
     await state.set_state(ManualQuizStates.options)
+    await _persist_manual_draft(state, user_id=message.from_user.id if message.from_user else 0, chat_id=message.chat.id)
     await message.answer(t(ui_lang, "manual_send_4_options"))
 
 
@@ -2920,6 +3085,7 @@ async def manual_question_image_photo(message: types.Message, state: FSMContext)
         return
     await state.update_data(current_image_file_id=photo.file_id)
     await state.set_state(ManualQuizStates.options)
+    await _persist_manual_draft(state, user_id=message.from_user.id if message.from_user else 0, chat_id=message.chat.id)
     await message.answer(t(ui_lang, "manual_send_4_options"))
 
 
@@ -2935,6 +3101,7 @@ async def manual_question_image_doc(message: types.Message, state: FSMContext) -
     doc = message.document
     await state.update_data(current_image_file_id=doc.file_id)
     await state.set_state(ManualQuizStates.options)
+    await _persist_manual_draft(state, user_id=message.from_user.id if message.from_user else 0, chat_id=message.chat.id)
     await message.answer(t(ui_lang, "manual_send_4_options"))
 
 
@@ -2965,6 +3132,7 @@ async def manual_options(message: types.Message, state: FSMContext) -> None:
 
     await state.update_data(current_options=options)
     await state.set_state(ManualQuizStates.choose_correct)
+    await _persist_manual_draft(state, user_id=message.from_user.id if message.from_user else 0, chat_id=message.chat.id)
 
     kb = InlineKeyboardBuilder()
     for i in range(4):
@@ -2995,6 +3163,7 @@ async def manual_correct(call: types.CallbackQuery, state: FSMContext) -> None:
     if not question_text or not isinstance(options, list) or len(options) != 4:
         await call.message.answer(t(ui_lang, "manual_question_missing"))
         await state.clear()
+        await clear_manual_quiz_draft(user_id=call.from_user.id)
         return
 
     questions.append(
@@ -3014,6 +3183,9 @@ async def manual_correct(call: types.CallbackQuery, state: FSMContext) -> None:
         current_image_file_id=None,
     )
 
+    if call.message:
+        await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
+
     kb = InlineKeyboardBuilder()
     kb.button(text=t(ui_lang, "btn_manual_add_more"), callback_data="m_add_more")
     kb.button(text=t(ui_lang, "btn_manual_finish"), callback_data="m_finish")
@@ -3030,6 +3202,8 @@ async def manual_add_more(call: types.CallbackQuery, state: FSMContext) -> None:
     if not data.get("m_ui_lang"):
         ui_lang = await _get_ui_lang(call.from_user.id)
     await state.set_state(ManualQuizStates.question)
+    if call.message:
+        await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
     await call.message.answer(t(ui_lang, "manual_next_question"))
 
 
@@ -3047,6 +3221,7 @@ async def manual_finish(call: types.CallbackQuery, state: FSMContext, bot: Bot) 
     if not title or not questions:
         await call.message.answer(t(ui_lang, "manual_empty"))
         await state.clear()
+        await clear_manual_quiz_draft(user_id=call.from_user.id)
         return
 
     user = call.from_user
@@ -3058,6 +3233,7 @@ async def manual_finish(call: types.CallbackQuery, state: FSMContext, bot: Bot) 
     inserted = await create_questions_bulk(quiz_id, questions)
 
     await state.clear()
+    await clear_manual_quiz_draft(user_id=call.from_user.id)
     await call.message.answer(t(ui_lang, "manual_created", id=quiz_id, n=inserted))
 
     username = await _get_bot_username(bot)
@@ -3095,6 +3271,7 @@ async def cmd_cancel(message: types.Message, state: FSMContext, bot: Bot) -> Non
     user_id = message.from_user.id if message.from_user else 0
     cancelled = await _cancel_user_runs(bot, chat_id=message.chat.id, user_id=user_id)
     await state.clear()
+    await clear_manual_quiz_draft(user_id=user_id)
     ui_lang = await _get_ui_lang(user_id)
     await message.answer(t(ui_lang, "stopped_n", n=cancelled))
 
@@ -3151,6 +3328,28 @@ def _kb_langs(session_id: str, *, ui_lang: str = "uz") -> types.InlineKeyboardMa
     kb.adjust(3, 3, 3, 1)
     return kb.as_markup()
 
+
+def _kb_page_presets(session_id: str, total_pages: int, *, ui_lang: str = "uz") -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    total_pages = int(total_pages or 0)
+    presets = [25, 50, 100]
+
+    ends: List[int] = []
+    for n in presets:
+        end = int(n)
+        if total_pages > 0:
+            end = min(total_pages, end)
+        end = max(1, end)
+        if end not in ends:
+            ends.append(end)
+
+    kb = InlineKeyboardBuilder()
+    for end in ends:
+        kb.button(text=f"1-{end}", callback_data=f"ai_pageset:{session_id}:1:{end}")
+    kb.button(text=t(ui_lang, "btn_cancel"), callback_data=f"ai_cancel:{session_id}")
+    kb.adjust(3, 1)
+    return kb.as_markup()
+
 def _kb_difficulty(session_id: str, *, ui_lang: str = "uz") -> types.InlineKeyboardMarkup:
     ui_lang = norm_ui_lang(ui_lang)
     kb = InlineKeyboardBuilder()
@@ -3160,6 +3359,15 @@ def _kb_difficulty(session_id: str, *, ui_lang: str = "uz") -> types.InlineKeybo
     kb.button(text=t(ui_lang, "btn_diff_mixed"), callback_data=f"ai_diff:{session_id}:mixed")
     kb.button(text=t(ui_lang, "btn_cancel"), callback_data=f"ai_cancel:{session_id}")
     kb.adjust(2)
+    return kb.as_markup()
+
+
+def _kb_topic_no_source(session_id: str, *, ui_lang: str = "uz") -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(ui_lang, "btn_topic_continue_anyway"), callback_data=f"ai_topic_anyway:{session_id}")
+    kb.button(text=t(ui_lang, "btn_cancel"), callback_data=f"ai_cancel:{session_id}")
+    kb.adjust(1)
     return kb.as_markup()
 
 
@@ -3582,7 +3790,103 @@ async def ai_pages(call: types.CallbackQuery, state: FSMContext) -> None:
     if cur_from >= 1 and cur_to >= cur_from:
         hint = t(ui_lang, "current_pages", p_from=cur_from, p_to=cur_to) + "\n"
     if call.message:
-        await call.message.answer(hint + t(ui_lang, "pages_prompt", total=total or 0))
+        await call.message.answer(
+            hint + t(ui_lang, "pages_prompt", total=total or 0),
+            reply_markup=_kb_page_presets(session_id, total, ui_lang=ui_lang),
+        )
+
+
+@router.callback_query(F.data.startswith("ai_pageset:"))
+async def ai_pageset(call: types.CallbackQuery, state: FSMContext) -> None:
+    parts = call.data.split(":")
+    if len(parts) != 4:
+        ui_lang = await _get_ui_lang(call.from_user.id)
+        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        return
+
+    session_id = parts[1]
+    try:
+        p_from = int(parts[2])
+        p_to = int(parts[3])
+    except Exception:
+        ui_lang = await _get_ui_lang(call.from_user.id)
+        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        return
+
+    data = await state.get_data()
+    ui_lang = norm_ui_lang(str(data.get("ai_ui_lang") or ""))
+    if not data.get("ai_ui_lang"):
+        ui_lang = await _get_ui_lang(call.from_user.id)
+    if data.get("ai_session_id") != session_id:
+        await call.answer(t(ui_lang, "session_missing"), show_alert=True)
+        return
+    if data.get("ai_user_id") != call.from_user.id:
+        await call.answer(t(ui_lang, "session_owner_only"), show_alert=True)
+        return
+
+    has_pages = bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
+    if not has_pages:
+        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        return
+
+    total_pages = int(data.get("ai_pages_total") or 0)
+    if total_pages <= 0 and data.get("ai_image_paths"):
+        try:
+            total_pages = len(list(data.get("ai_image_paths") or []))
+        except Exception:
+            total_pages = 0
+
+    if p_from < 1 or p_to < 1 or p_to < p_from:
+        await call.answer(t(ui_lang, "pages_invalid", total=total_pages or 0), show_alert=True)
+        return
+    if total_pages > 0 and (p_from > total_pages or p_to > total_pages):
+        await call.answer(t(ui_lang, "pages_invalid", total=total_pages), show_alert=True)
+        return
+
+    await call.answer()
+    await state.update_data(ai_page_from=int(p_from), ai_page_to=int(p_to))
+
+    image_paths = list(data.get("ai_image_paths") or [])
+    if image_paths:
+        new_max = max(1, min(len(image_paths), int(p_to) - int(p_from) + 1))
+        await state.update_data(ai_max_questions=int(new_max))
+        qcount = int(data.get("ai_question_count") or 0)
+        if qcount and qcount > new_max:
+            await state.update_data(ai_question_count=int(new_max))
+
+    if call.message:
+        await call.message.answer(t(ui_lang, "pages_set", p_from=int(p_from), p_to=int(p_to)))
+
+    data = await state.get_data()
+    show_pages = bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
+    return_to = str(data.get("ai_pages_return") or "count").strip().lower()
+    if return_to == "translate":
+        await state.set_state(AIQuizStates.choose_translate)
+        settings = await get_or_create_user_settings(user_id=call.from_user.id)
+        default_lang = str(settings.get("default_lang") or "source")
+        if call.message:
+            await call.message.answer(
+                t(ui_lang, "need_translation"),
+                reply_markup=_kb_translate(session_id, default_lang=default_lang, ui_lang=ui_lang, show_pages=show_pages),
+            )
+        return
+
+    max_n = int(data.get("ai_max_questions") or 50)
+    max_n = max(1, min(50, max_n))
+    await state.set_state(AIQuizStates.choose_count)
+    mode = str(data.get("ai_mode") or "").strip().lower()
+    prompt_key = "choose_count"
+    prompt_kwargs: Dict[str, Any] = {"max_n": max_n}
+    if mode == "scanpdf":
+        pages = int(data.get("ai_max_questions") or data.get("ai_pages_total") or 0)
+        pages = max(1, int(pages or 0))
+        prompt_key = "scan_pdf_choose_count"
+        prompt_kwargs = {"pages": pages, "max_n": min(50, pages)}
+    if call.message:
+        await call.message.answer(
+            t(ui_lang, prompt_key, **prompt_kwargs),
+            reply_markup=_kb_counts(session_id, max_n=max_n, ui_lang=ui_lang, show_pages=show_pages),
+        )
 
 
 @router.callback_query(F.data.startswith("ai_topic:"))
@@ -3771,13 +4075,19 @@ async def ai_choose_pages_text(message: types.Message, state: FSMContext) -> Non
         except Exception:
             total_pages = 0
     if not raw:
-        await message.answer(t(ui_lang, "pages_prompt", total=total_pages or 0))
+        await message.answer(
+            t(ui_lang, "pages_prompt", total=total_pages or 0),
+            reply_markup=_kb_page_presets(str(data.get("ai_session_id") or ""), total_pages or 0, ui_lang=ui_lang),
+        )
         return
 
     low = raw.strip().lower()
     if low in {"-", "0", "yoq", "yo'q", "yoвЂq", "none", "no", "skip", "all", "hammasi"}:
         await message.answer(t(ui_lang, "pages_required"))
-        await message.answer(t(ui_lang, "pages_prompt", total=total_pages or 0))
+        await message.answer(
+            t(ui_lang, "pages_prompt", total=total_pages or 0),
+            reply_markup=_kb_page_presets(str(data.get("ai_session_id") or ""), total_pages or 0, ui_lang=ui_lang),
+        )
         return
     else:
         pr = _parse_page_range(raw)
@@ -3928,6 +4238,38 @@ async def ai_choose_topic_text(message: types.Message, state: FSMContext) -> Non
     if mode == "topic" and topic:
         await state.update_data(ai_title=topic[:120])
 
+        # Best-effort: try to find a reliable source text for the topic (e.g., book/article)
+        # and use it as context so questions become more meaningful.
+        try:
+            status = await message.answer(t(ui_lang, "topic_searching"))
+        except Exception:
+            status = None
+
+        try:
+            ctx = await fetch_topic_context(topic, ui_lang=ui_lang)
+        except Exception:
+            ctx = None
+
+        if ctx and str(getattr(ctx, "text", "") or "").strip():
+            await state.update_data(ai_text=str(ctx.text), ai_title=str(ctx.title or topic)[:120])
+            if status:
+                try:
+                    await status.edit_text(t(ui_lang, "topic_source_found", title=str(ctx.title or topic)[:120]))
+                except Exception:
+                    pass
+        else:
+            if status:
+                try:
+                    await status.edit_text(
+                        t(ui_lang, "topic_source_not_found"),
+                        reply_markup=_kb_topic_no_source(str(data.get("ai_session_id") or ""), ui_lang=ui_lang),
+                    )
+                except Exception:
+                    pass
+            # Don't proceed to difficulty/count/time without a source (prevents shallow nonsense quizzes).
+            # User can explicitly continue via the "continue anyway" button.
+            return
+
     data = await state.get_data()
     session_id = str(data.get("ai_session_id") or "")
 
@@ -3968,6 +4310,47 @@ async def ai_choose_difficulty_text(message: types.Message, state: FSMContext) -
     max_n = max(1, min(50, max_n))
     user_id = message.from_user.id if message.from_user else 0
     await _continue_after_topic_settings(message, state, ui_lang=ui_lang, user_id=user_id, max_n=max_n)
+
+
+@router.callback_query(F.data.startswith("ai_topic_anyway:"))
+async def ai_topic_anyway(call: types.CallbackQuery, state: FSMContext) -> None:
+    parts = call.data.split(":", 1)
+    if len(parts) != 2:
+        ui_lang = await _get_ui_lang(call.from_user.id)
+        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        return
+    session_id = parts[1]
+
+    data = await state.get_data()
+    ui_lang = norm_ui_lang(str(data.get("ai_ui_lang") or ""))
+    if not data.get("ai_ui_lang"):
+        ui_lang = await _get_ui_lang(call.from_user.id)
+    if data.get("ai_session_id") != session_id:
+        await call.answer(t(ui_lang, "session_missing"), show_alert=True)
+        return
+    if data.get("ai_user_id") != call.from_user.id:
+        await call.answer(t(ui_lang, "session_owner_only"), show_alert=True)
+        return
+
+    await call.answer()
+
+    # Proceed without external source; keep ai_text empty so AI uses topic-only prompting.
+    mode = str(data.get("ai_mode") or "").strip().lower()
+    if mode != "topic":
+        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        return
+
+    cur_diff = str(data.get("ai_difficulty") or "").strip().lower()
+    if not cur_diff:
+        await state.set_state(AIQuizStates.choose_difficulty)
+        if call.message:
+            await call.message.answer(t(ui_lang, "choose_difficulty"), reply_markup=_kb_difficulty(session_id, ui_lang=ui_lang))
+        return
+
+    max_n = int(data.get("ai_max_questions") or 50)
+    max_n = max(1, min(50, max_n))
+    if call.message:
+        await _continue_after_topic_settings(call.message, state, ui_lang=ui_lang, user_id=call.from_user.id, max_n=max_n)
 
 
 @router.message(AIQuizStates.choose_count)
@@ -4164,6 +4547,38 @@ async def ai_choose_time(call: types.CallbackQuery, state: FSMContext) -> None:
         )
 
 
+async def _animate_working_message(
+    bot: Bot,
+    *,
+    chat_id: int,
+    message_id: int,
+    base_text: str,
+    stop: asyncio.Event,
+    interval_sec: float = 4.0,
+) -> None:
+    raw = str(os.getenv("AI_WORKING_ANIM_ENABLED", "1") or "1").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return
+
+    base = str(base_text or "").strip()
+    base = base.rstrip(".").rstrip("…").strip() or str(base_text or "").strip()
+    frames = [".", "..", "..."]
+    i = 0
+    while not stop.is_set():
+        i = (i + 1) % len(frames)
+        try:
+            await asyncio.wait_for(
+                bot.edit_message_text(chat_id=int(chat_id), message_id=int(message_id), text=f"{base}{frames[i]}"),
+                timeout=float(os.getenv("AI_WORKING_ANIM_TIMEOUT_SEC", "2.5") or 2.5),
+            )
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=float(interval_sec))
+        except asyncio.TimeoutError:
+            continue
+
+
 async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: types.User, output_language: str) -> None:
     data = await state.get_data()
     ui_lang = norm_ui_lang(str(data.get("ai_ui_lang") or ""))
@@ -4218,7 +4633,18 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
         return
 
     msg = await bot.send_message(chat_id, t(ui_lang, "ai_working"))
+    anim_stop = asyncio.Event()
+    anim_task = asyncio.create_task(
+        _animate_working_message(
+            bot,
+            chat_id=int(chat_id),
+            message_id=int(getattr(msg, "message_id", 0) or 0),
+            base_text=t(ui_lang, "ai_working"),
+            stop=anim_stop,
+        )
+    )
     quiz_id: Optional[int] = None
+    imported_ready = False
     try:
         use_paths: List[str] = []
         if image_paths:
@@ -4242,7 +4668,18 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                 except Exception as exc:
                     raise AIServiceError(f"PPTX slaydlardan matn ajratib bo'lmadi: {exc}") from exc
 
-                if len(use_text.strip()) < 200:
+                # If the selected range already contains a ready quiz (Q + options + Answer),
+                # import it directly (keeps order, doesn't lose questions).
+                try:
+                    parsed_title, ready_questions = parse_quiz_payload(use_text, title_fallback=title)
+                except Exception:
+                    parsed_title, ready_questions = ("", [])
+                if ready_questions:
+                    imported_ready = True
+                    if parsed_title:
+                        title = parsed_title.strip()[:120]
+                    questions = ready_questions[: int(question_count or len(ready_questions))]
+                elif len(use_text.strip()) < 200:
                     try:
                         provider = ai_service._pick_provider()
                     except AIServiceError as exc:
@@ -4285,7 +4722,18 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                 except Exception as exc:
                     raise AIServiceError(f"PDF sahifalaridan matn ajratib bo'lmadi: {exc}") from exc
 
-                if len(use_text.strip()) < 200:
+                # If the selected range already contains a ready quiz (Q + options + Answer),
+                # import it directly (keeps order, doesn't lose questions).
+                try:
+                    parsed_title, ready_questions = parse_quiz_payload(use_text, title_fallback=title)
+                except Exception:
+                    parsed_title, ready_questions = ("", [])
+                if ready_questions:
+                    imported_ready = True
+                    if parsed_title:
+                        title = parsed_title.strip()[:120]
+                    questions = ready_questions[: int(question_count or len(ready_questions))]
+                elif len(use_text.strip()) < 200:
                     try:
                         provider = ai_service._pick_provider()
                     except AIServiceError as exc:
@@ -4321,13 +4769,23 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                         focus_topic=topic,
                     )
         elif text:
-            questions = await ai_service.generate_quiz_from_text(
-                text,
-                question_count=question_count,
-                output_language=output_language,
-                difficulty=difficulty,
-                focus_topic=topic,
-            )
+            try:
+                parsed_title, ready_questions = parse_quiz_payload(text, title_fallback=title)
+            except Exception:
+                parsed_title, ready_questions = ("", [])
+            if ready_questions:
+                imported_ready = True
+                if parsed_title:
+                    title = parsed_title.strip()[:120]
+                questions = ready_questions[: int(question_count or len(ready_questions))]
+            else:
+                questions = await ai_service.generate_quiz_from_text(
+                    text,
+                    question_count=question_count,
+                    output_language=output_language,
+                    difficulty=difficulty,
+                    focus_topic=topic,
+                )
         else:
             questions = await ai_service.generate_quiz_from_topic(
                 topic,
@@ -4342,7 +4800,7 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
         reservation = await reserve_user_quota(user.id, quota_kind)
 
         await get_or_create_user(user_id=user.id, full_name=user.full_name, username=getattr(user, "username", None))
-        quiz_id = await create_quiz(title=title, creator_id=user.id, is_ai_generated=True, open_period=open_period)
+        quiz_id = await create_quiz(title=title, creator_id=user.id, is_ai_generated=(not imported_ready), open_period=open_period)
 
         # Persist images under media/quizzes/<quiz_id>/ so the quiz can be re-run any time.
         moved_sources: set[str] = set()
@@ -4389,6 +4847,7 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
             meta_line += t(ui_lang, "topic_line", topic=topic)
         if page_from >= 1 and page_to >= page_from:
             meta_line += t(ui_lang, "pages_line", p_from=page_from, p_to=page_to)
+            meta_line += t(ui_lang, "done_line", p_from=page_from, p_to=page_to, n=len(questions))
         text_out = t(
             ui_lang,
             "ai_quiz_ready",
@@ -4400,7 +4859,14 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
             id=int(quiz_id or 0),
         )
         if len(questions) < int(question_count or 0):
-            text_out = text_out + "\n\n" + t(ui_lang, "ai_partial", wanted=int(question_count), made=int(len(questions)))
+            if imported_ready:
+                text_out = text_out + "\n\n" + t(ui_lang, "import_partial", wanted=int(question_count), found=int(len(questions)))
+            else:
+                text_out = text_out + "\n\n" + t(ui_lang, "ai_partial", wanted=int(question_count), made=int(len(questions)))
+        anim_stop.set()
+        with suppress(Exception):
+            await anim_task
+
         await msg.edit_text(
             text_out,
             reply_markup=_kb_quiz_share(
@@ -4415,16 +4881,30 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
             ),
         )
     except QuotaExceeded as exc:
+        anim_stop.set()
+        with suppress(Exception):
+            await anim_task
         await msg.edit_text(_quota_exceeded_text(ui_lang, exc), reply_markup=_kb_premium_plans(ui_lang))
     except AIServiceError as exc:
         if reservation and quiz_id is None:
             await refund_user_quota(reservation)
+        anim_stop.set()
+        with suppress(Exception):
+            await anim_task
         await msg.edit_text(t(ui_lang, "err_ai", err=str(exc)))
     except Exception as exc:
         if reservation and quiz_id is None:
             await refund_user_quota(reservation)
+        anim_stop.set()
+        with suppress(Exception):
+            await anim_task
         await msg.edit_text(t(ui_lang, "err_unexpected", err=str(exc)))
     finally:
+        anim_stop.set()
+        if anim_task and not anim_task.done():
+            anim_task.cancel()
+            with suppress(Exception):
+                await anim_task
         # If we were processing scanned-PDF images and the quiz was NOT saved, cleanup the temp images.
         if quiz_id is None and image_paths:
             for p in image_paths:
@@ -4855,7 +5335,10 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
 
             await state.update_data(**data_out)
             await state.set_state(AIQuizStates.choose_pages)
-            await status.edit_text(t(ui_lang, "pages_prompt", total=int(pages_total or 0)))
+            await status.edit_text(
+                t(ui_lang, "pages_prompt", total=int(pages_total or 0)),
+                reply_markup=_kb_page_presets(session_id, int(pages_total or 0), ui_lang=ui_lang),
+            )
             cleanup_local = False
             return
 
@@ -4870,11 +5353,6 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
             parsed_title, ready_questions = parse_quiz_payload(text, title_fallback=Path(file_name).stem)
         except Exception:
             parsed_title, ready_questions = ("", [])
-
-        if ready_questions:
-            starts = len(re.findall(r"(?m)^\s*(?:Q(?:uestion)?\s*)?\d{1,3}\s*[).:\-]", text or ""))
-            if starts >= 3 and len(ready_questions) < max(1, int(starts * 0.6)):
-                ready_questions = []
 
         if ready_questions:
             title2 = (parsed_title or Path(file_name).stem).strip()[:120]

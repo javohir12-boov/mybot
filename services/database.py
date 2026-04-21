@@ -126,6 +126,15 @@ class QuizAttempt(Base):
     chat_type = Column(Text, default="")
     finished = Column(Boolean, default=True)
     completed_at = Column(Text, default="")  # ISO timestamp
+
+
+class ManualQuizDraft(Base):
+    __tablename__ = "manual_quiz_drafts"
+    user_id = Column(BigInteger, primary_key=True)
+    chat_id = Column(BigInteger, default=0)
+    state = Column(Text, default="")  # aiogram FSM state string
+    data = Column(Text, default="{}")  # JSON-encoded FSM data
+    updated_at = Column(Text, default="")  # ISO UTC
 # --- MODELLAR TUGASHI ---
 
 # Ma'lumotlar bazasiga ulanish sozlamalari (Async)
@@ -534,6 +543,59 @@ async def init_db():
 def _utc_now_iso() -> str:
     # ISO format keeps lexicographical order (useful for MAX on SQLite text).
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+async def upsert_manual_quiz_draft(*, user_id: int, chat_id: int, state: str, data: dict) -> None:
+    user_id = int(user_id or 0)
+    chat_id = int(chat_id or 0)
+    payload = json.dumps(data or {}, ensure_ascii=False)
+    st = str(state or "").strip()
+    now = _utc_now_iso()
+
+    async with async_session() as session:
+        row = await session.get(ManualQuizDraft, user_id)
+        if row is None:
+            row = ManualQuizDraft(user_id=user_id, chat_id=chat_id, state=st, data=payload, updated_at=now)
+            session.add(row)
+        else:
+            row.chat_id = chat_id
+            row.state = st
+            row.data = payload
+            row.updated_at = now
+        await session.commit()
+
+
+async def get_manual_quiz_draft(*, user_id: int) -> Optional[dict]:
+    user_id = int(user_id or 0)
+    if user_id <= 0:
+        return None
+
+    async with async_session() as session:
+        row = await session.get(ManualQuizDraft, user_id)
+        if row is None:
+            return None
+        try:
+            data = json.loads(str(row.data or "{}"))
+        except Exception:
+            data = {}
+        return {
+            "user_id": int(row.user_id),
+            "chat_id": int(getattr(row, "chat_id", 0) or 0),
+            "state": str(getattr(row, "state", "") or ""),
+            "data": data if isinstance(data, dict) else {},
+            "updated_at": str(getattr(row, "updated_at", "") or ""),
+        }
+
+
+async def clear_manual_quiz_draft(*, user_id: int) -> None:
+    user_id = int(user_id or 0)
+    if user_id <= 0:
+        return
+    async with async_session() as session:
+        row = await session.get(ManualQuizDraft, user_id)
+        if row is not None:
+            await session.delete(row)
+            await session.commit()
 
 
 async def create_quiz_attempts_bulk(

@@ -474,7 +474,90 @@ def _load_json_from_text(text: str) -> Any:
             raise AIServiceError("AI response JSON parsing failed") from exc
 
 
+def _safe_float_env(*names: str, default: float) -> float:
+    """Read float from env with fallback chain. Never raises."""
+    for n in names:
+        try:
+            raw = os.getenv(n)
+            if raw is None:
+                continue
+            raw = str(raw).strip()
+            if raw == "":
+                continue
+            return float(raw)
+        except Exception:
+            continue
+    return float(default)
+
+
 def _normalize_quiz(data: Any) -> List[Dict[str, Any]]:
+    def _coerce_options(raw: Any) -> List[str]:
+        """Coerce common option shapes into a clean 4-item list.
+
+        AI sometimes returns:
+        - list[str]
+        - str with newlines
+        - dict {"A": "...", "B": "...", ...}
+        - list[dict] [{"text":"..."}, ...]
+        """
+        if raw is None:
+            return []
+
+        # dict: prefer A/B/C/D ordering
+        if isinstance(raw, dict):
+            keys = list(raw.keys())
+            letter_keys = {str(k).strip().upper() for k in keys}
+            if letter_keys.issuperset({"A", "B"}) and any(k in letter_keys for k in ("C", "D")):
+                ordered: List[str] = []
+                for k in ("A", "B", "C", "D"):
+                    if k in letter_keys:
+                        # Find the original key that matches this letter
+                        for kk, vv in raw.items():
+                            if str(kk).strip().upper() == k:
+                                ordered.append(str(vv).strip())
+                                break
+                return [s for s in ordered if s]
+            # Fallback: take values in insertion order
+            raw = list(raw.values())
+
+        # string: split by newline or pipes
+        if isinstance(raw, str):
+            return [s.strip() for s in re.split(r"[|\n]", raw) if s.strip()]
+
+        if not isinstance(raw, list):
+            return []
+
+        out: List[str] = []
+        for o in raw:
+            if o is None:
+                continue
+            if isinstance(o, str):
+                s = o.strip()
+                if s:
+                    out.append(s)
+                continue
+            if isinstance(o, dict):
+                # common keys
+                for k in ("text", "value", "option", "answer", "content", "label"):
+                    if k in o and str(o.get(k) or "").strip():
+                        out.append(str(o.get(k) or "").strip())
+                        break
+                else:
+                    # if dict is {"A": "..."} etc, take first value
+                    try:
+                        vv = next(iter(o.values()))
+                        s = str(vv).strip()
+                        if s:
+                            out.append(s)
+                    except Exception:
+                        pass
+                continue
+            # anything else: stringify
+            s = str(o).strip()
+            if s:
+                out.append(s)
+        return out
+
     if isinstance(data, dict):
         for key in ("quiz", "questions", "items"):
             if key in data and isinstance(data[key], list):
@@ -490,16 +573,10 @@ def _normalize_quiz(data: Any) -> List[Dict[str, Any]]:
             continue
 
         question = str(item.get("question") or item.get("text") or "").strip()
-        options = item.get("options") or item.get("variants") or item.get("answers") or []
+        options_raw = item.get("options") or item.get("variants") or item.get("answers") or []
         explanation = str(item.get("explanation") or item.get("comment") or "").strip()
 
-        if isinstance(options, str):
-            options = [s.strip() for s in re.split(r"[|\n]", options) if s.strip()]
-
-        if not isinstance(options, list):
-            continue
-
-        options = [str(o).strip() for o in options if str(o).strip()]
+        options = _coerce_options(options_raw)
         if len(options) < 4:
             continue
         if len(options) > 4:
@@ -665,11 +742,19 @@ class AIService:
 
         diff_extra = _difficulty_instruction(difficulty).strip()
 
-        # Keep prompts bounded for speed/cost. Override via env if needed.
-        max_chars = int(os.getenv("AI_MAX_TEXT_CHARS", "12000"))
+        # Keep prompts bounded for speed/cost, but scale up for larger requested quizzes.
+        default_max_chars = 12000
+        if question_count >= 20:
+            default_max_chars = 20000
+        if question_count >= 35:
+            default_max_chars = 32000
+
+        max_chars = int(os.getenv("AI_MAX_TEXT_CHARS", str(default_max_chars)))
         max_chars = max(5000, min(120000, max_chars))
         focus_topic = (focus_topic or "").strip()
         if focus_topic:
+            # Topic-focused extraction benefits from a bit more context so the topic is covered broadly.
+            max_chars = max(max_chars, min(50000, default_max_chars + 8000))
             cleaned = _extract_relevant_text(cleaned, focus_topic, max_chars=max_chars)
         else:
             cleaned = cleaned[:max_chars]
@@ -688,7 +773,12 @@ class AIService:
         if diff_extra:
             extra0 = (diff_extra + ("\n\n" + extra0 if extra0 else "")).strip()
 
-        batch_size = int(os.getenv("AI_BATCH_SIZE", "10") or 10)
+        default_batch_size = 10
+        if question_count >= 25:
+            default_batch_size = 12
+        if question_count >= 40:
+            default_batch_size = 14
+        batch_size = int(os.getenv("AI_BATCH_SIZE", str(default_batch_size)) or default_batch_size)
         batch_size = max(1, min(20, batch_size))
 
         if provider == "openai":
@@ -718,14 +808,30 @@ class AIService:
             uniq.append(q)
 
         # If the model returned fewer than requested, try to fill the gap (bounded retries).
-        max_retries = int(os.getenv("AI_FILL_RETRIES", "2"))
-        max_retries = max(0, min(5, max_retries))
-        max_iters = max_retries + (question_count + batch_size - 1) // batch_size
+        max_retries = int(os.getenv("AI_FILL_RETRIES", "4") or 4)
+        max_retries = max(0, min(8, max_retries))
+        # Allow enough attempts for big counts; otherwise we might silently return far fewer questions.
+        max_iters = max(
+            max_retries + (question_count + batch_size - 1) // batch_size,
+            (question_count * 2 + batch_size - 1) // batch_size,
+        )
         tries = 0
         while len(uniq) < question_count and tries < max_iters:
             tries += 1
             remaining = question_count - len(uniq)
-            ask = min(remaining, batch_size)
+            if remaining <= 0:
+                break
+
+            parallel_default = 2 if question_count < 25 else 3
+            parallel = int(
+                os.getenv(
+                    "AI_PARALLEL_BATCHES_TEXT",
+                    os.getenv("AI_PARALLEL_BATCHES", str(parallel_default)),
+                )
+                or parallel_default
+            )
+            parallel = max(1, min(5, parallel))
+
             avoid = "\n".join(f"- {q['question']}" for q in uniq[:12] if q.get("question"))
             extra = "Quyidagi savollarni takrorlamang:\n" + avoid if avoid else ""
 
@@ -734,28 +840,37 @@ class AIService:
             if diff_extra:
                 extra = (diff_extra + ("\n\n" + extra if extra else "")).strip()
 
-            if provider == "openai":
-                more = await self._generate_openai(
-                    cleaned,
-                    ask,
-                    lang_instruction=lang_instruction,
-                    extra_instructions=extra,
-                )
-            else:
-                more = await self._generate_gemini(
-                    cleaned,
-                    ask,
-                    lang_instruction=lang_instruction,
-                    extra_instructions=extra,
-                )
+            tasks = []
+            to_ask = remaining
+            for _ in range(parallel):
+                if to_ask <= 0:
+                    break
+                ask = min(to_ask, batch_size)
+                to_ask -= ask
+                if provider == "openai":
+                    tasks.append(self._generate_openai(cleaned, ask, lang_instruction=lang_instruction, extra_instructions=extra))
+                else:
+                    tasks.append(self._generate_gemini(cleaned, ask, lang_instruction=lang_instruction, extra_instructions=extra))
 
-            for q in more:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            more_all = []
+            for res in results:
+                if isinstance(res, Exception):
+                    raise res
+                more_all.extend(res)
+
+            for q in more_all:
                 key = str(q.get("question") or "").strip().lower()
                 if not key or key in seen:
                     continue
                 seen.add(key)
                 uniq.append(q)
 
+        if len(uniq) < question_count:
+            raise AIServiceError(
+                f"AI savollarni to'liq qaytara olmadi: {len(uniq)}/{question_count}. "
+                "Kamroq savol sonini tanlang yoki matn/hujjatni qisqartiring."
+            )
         return uniq[:question_count]
 
     async def generate_quiz_from_topic(
@@ -773,7 +888,12 @@ class AIService:
         lang_instruction = _language_instruction(output_language)
         diff_extra_topic = _difficulty_instruction(difficulty).strip()
 
-        batch_size = int(os.getenv("AI_BATCH_SIZE", "10") or 10)
+        default_batch_size = 10
+        if question_count >= 25:
+            default_batch_size = 12
+        if question_count >= 40:
+            default_batch_size = 14
+        batch_size = int(os.getenv("AI_BATCH_SIZE", str(default_batch_size)) or default_batch_size)
         batch_size = max(1, min(20, batch_size))
 
         if provider == "openai":
@@ -815,7 +935,8 @@ class AIService:
             if remaining <= 0:
                 break
 
-            parallel = int(os.getenv("AI_PARALLEL_BATCHES", "2") or 2)
+            parallel_default = 2 if question_count < 25 else 3
+            parallel = int(os.getenv("AI_PARALLEL_BATCHES", str(parallel_default)) or parallel_default)
             parallel = max(1, min(5, parallel))
 
             avoid = "\n".join(f"- {q['question']}" for q in uniq[:12] if q.get("question"))
@@ -859,6 +980,11 @@ class AIService:
                         continue
                     seen.add(key)
                     uniq.append(q)
+        if len(uniq) < question_count:
+            raise AIServiceError(
+                f"AI mavzu bo'yicha savollarni to'liq qaytara olmadi: {len(uniq)}/{question_count}. "
+                "Kamroq savol sonini tanlang yoki mavzuni aniqroq yozing."
+            )
         return uniq[:question_count]
 
     async def generate_quiz_from_images(
@@ -1123,7 +1249,7 @@ class AIService:
         timeout_sec = max(5.0, min(600.0, timeout_sec))
         total_timeout = float(os.getenv("OPENAI_TOTAL_TIMEOUT_SEC", "0") or 0)
         if total_timeout <= 0:
-            total_timeout = min(900.0, timeout_sec + 30.0)
+            total_timeout = min(180.0, timeout_sec + 20.0)
 
         system_prompt = (
             "Sen professional testologsan. Berilgan matn asosida ko'p tanlovli test yarat.\n"
@@ -1144,6 +1270,9 @@ class AIService:
 
         user_prompt = f"{extra_instructions}\n\nMatn:\n{text}".strip()
 
+        text_temp = _safe_float_env("OPENAI_TEXT_TEMPERATURE", "OPENAI_TEMPERATURE", default=0.25)
+        text_temp = max(0.0, min(1.0, float(text_temp)))
+
         try:
             response = await asyncio.wait_for(
                 client.chat.completions.create(
@@ -1152,7 +1281,7 @@ class AIService:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    temperature=0.2,
+                    temperature=text_temp,
                     response_format={"type": "json_object"},
                 ),
                 timeout=total_timeout,
@@ -1199,13 +1328,15 @@ class AIService:
         timeout_sec = max(5.0, min(600.0, timeout_sec))
         total_timeout = float(os.getenv("OPENAI_TOTAL_TIMEOUT_SEC", "0") or 0)
         if total_timeout <= 0:
-            total_timeout = min(900.0, timeout_sec + 30.0)
+            total_timeout = min(180.0, timeout_sec + 20.0)
         system_prompt = f"""Sen professional testologsan. Berilgan MAVZU bo'yicha ko'p tanlovli test yarat.
 - Savollar soni: {question_count}
 - Mavzuni KENG qamrab ol: asosiy tushunchalar, sabab-oqibat, taqqoslash, amaliy qo'llanish, tipik xatolar, terminlar/ta'riflar, klassifikatsiya (mavzuga mos bo'lsa).
 - Savollar bir xil qolipda bo'lmasin: savolning boshlanishi va uslubi turlicha bo'lsin (hammasi bir xil so'z bilan boshlanmasin).
 - Mavzu so'zi bilan har doim boshlamang. (Masalan, 'Olma ...' deb ketma-ket boshlamang.)
 - Har savolda 4 ta variant bo'lsin
+- Savollar bir xil qolipda bo'lmasin: savolning boshlanishi/uslubi turlicha bo'lsin
+- Muhim: EXACTLY shu miqdorda savol qaytar (ro'yxat uzunligi aynan Savollar soni bo'lsin)
 - Variantlar bir xil uslubda bo'lsin (hammasi ibora yoki hammasi 1 gap)
 - Variantlar uzunligi bir-biriga yaqin bo'lsin: eng uzun va eng qisqa variant farqi 2-3 so'zdan oshmasin
 - Juda qisqa (1-2 so'zli) va juda uzun variantlardan qoching; har bir variant taxminan 4-10 so'z bo'lsin
@@ -1219,6 +1350,9 @@ Natijani faqat JSON ko'rinishida qaytar: {{\"quiz\": [...]}}.
 Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"correct_index\": 0, \"explanation\": \"...\"}}"""
 
         user_prompt = f"{extra_instructions}\n\nMavzu: {topic}".strip()
+
+        topic_temp = _safe_float_env("OPENAI_TOPIC_TEMPERATURE", "OPENAI_TEMPERATURE", default=0.35)
+        topic_temp = max(0.0, min(1.0, float(topic_temp)))
 
         try:
             response = await asyncio.wait_for(
@@ -1602,4 +1736,8 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
         if not questions:
             raise AIServiceError("AI did not return any valid questions from image")
         return questions[0]
+
+
+
+
 

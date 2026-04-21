@@ -27,7 +27,7 @@
   "btn_newquiz": "新建测验",
   "btn_next": "下一题",
   "btn_no_translate": "不翻译（原文）",
-  "btn_pages_optional": "页码（可选）",
+  "btn_pages_optional": "页码",
   "btn_pay": "??",
   "btn_premium": "???",
   "btn_premium_approve": "??",
@@ -122,7 +122,8 @@
   "pages_cleared": "已清除页码范围（使用全部页）。",
   "pages_invalid": "页码范围无效。请使用 1..{total}。例如：20-30。",
   "pages_line": "页码：{p_from}-{p_to}\n",
-  "pages_prompt": "可选：使用哪些页？(1..{total})\n例如：`20-30` 或 `20`\n发送 `0` 清除。",
+  "pages_prompt": "使用哪个页码范围？(1..{total})\n示例: `20-30` 或 `20`",
+  "pages_required": "必须选择页码范围。",
   "pages_set": "页码已保存：{p_from}-{p_to}",
   "participants_joined": "参与者（加入）：{n}",
   "payment_card_info": "?????\n{card}\n????{holder}\n\n???{plan}\n???{price} UZS\n\n???????/???",
@@ -184,6 +185,7 @@
   "total_questions": "题目总数：{n}",
   "ui_lang_choose": "选择界面语言：",
   "ui_lang_saved": "已保存。界面语言：{lang_name}",
-  "upload_hint": "发送文件 (.pdf / .docx / .pptx / .txt)。\nPDF 也可以选择页码范围（页码（可选））。\n然后选择设置。",
+  "upload_hint": "发送文件 (.pdf / .docx / .pptx / .txt)。\nPDF/PPTX 必须选择页码范围。\n然后选择设置。",
+  "ai_partial": "提示：请求 {wanted}，已生成 {made}。",
   "upload_hint_noai": "发送测验文件 (.txt / .json / .docx / .pptx / .pdf)。\n文件必须包含现成题目：题目 + A/B/C/D 选项 + Answer。\n示例：\n1) 题目？\nA) ...\nB) ...\nC) ...\nD) ...\nAnswer: B"
 }

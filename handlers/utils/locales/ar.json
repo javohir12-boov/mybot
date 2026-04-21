@@ -27,7 +27,7 @@
   "btn_newquiz": "اختبار جديد",
   "btn_next": "التالي",
   "btn_no_translate": "بدون ترجمة (الأصل)",
-  "btn_pages_optional": "الصفحات (اختياري)",
+  "btn_pages_optional": "الصفحات",
   "btn_pay": "?????",
   "btn_premium": "???????",
   "btn_premium_approve": "??????",
@@ -122,7 +122,8 @@
   "pages_cleared": "تم مسح نطاق الصفحات (كل الصفحات).",
   "pages_invalid": "نطاق صفحات غير صالح. استخدم 1..{total}. مثال: 20-30.",
   "pages_line": "الصفحات: {p_from}-{p_to}\n",
-  "pages_prompt": "اختياري: أي صفحات أستخدم؟ (1..{total})\nمثال: `20-30` أو `20`\nأرسل `0` لمسح.",
+  "pages_prompt": "ما نطاق الصفحات الذي يجب استخدامه؟ (1..{total})\nمثال: `20-30` أو `20`",
+  "pages_required": "اختيار نطاق الصفحات مطلوب.",
   "pages_set": "تم حفظ الصفحات: {p_from}-{p_to}",
   "participants_joined": "المشاركون (انضم): {n}",
   "payment_card_info": "????? ?????:\n{card}\n?????: {holder}\n\n?????: {plan}\n?????: {price} UZS\n\n???? ?? ???? ???????/???? ??????.",
@@ -184,6 +185,7 @@
   "total_questions": "إجمالي الأسئلة: {n}",
   "ui_lang_choose": "اختر لغة الواجهة:",
   "ui_lang_saved": "تم الحفظ. لغة الواجهة: {lang_name}",
-  "upload_hint": "أرسل ملفًا (.pdf / .docx / .pptx / .txt).\nلملفات PDF يمكنك اختيار نطاق صفحات (الصفحات (اختياري)).\nثم اختر الإعدادات.",
+  "upload_hint": "أرسل ملفًا (.pdf / .docx / .pptx / .txt).\nبالنسبة لـ PDF/PPTX يجب اختيار نطاق صفحات.\nثم اختر الإعدادات.",
+  "ai_partial": "ملاحظة: المطلوب {wanted}، تم إنشاء {made}.",
   "upload_hint_noai": "أرسل ملف اختبار (.txt / .json / .docx / .pptx / .pdf).\nيجب أن يحتوي الملف على أسئلة جاهزة: سؤال + خيارات A/B/C/D + Answer.\nمثال:\n1) سؤال؟\nA) ...\nB) ...\nC) ...\nD) ...\nAnswer: B"
 }

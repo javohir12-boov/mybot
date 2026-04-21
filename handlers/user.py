@@ -366,6 +366,55 @@ def _render_pdf_pages_to_images(pdf_path: Path, out_dir: Path, *, max_pages: int
     return paths
 
 
+def _render_pdf_page_range_to_images(
+    pdf_path: Path,
+    out_dir: Path,
+    page_from: int,
+    page_to: int,
+    *,
+    max_pages: int = 30,
+    zoom: float = 2.0,
+) -> List[str]:
+    """Render a 1-based inclusive PDF page range to PNG images."""
+    try:
+        import fitz  # PyMuPDF
+    except Exception as exc:
+        raise RuntimeError("PyMuPDF (fitz) kerak. O'rnatish: pip install PyMuPDF") from exc
+
+    p_from = int(page_from or 0)
+    p_to = int(page_to or 0)
+    if p_from < 1 or p_to < 1 or p_to < p_from:
+        return []
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths: List[str] = []
+    max_pages = max(1, min(80, int(max_pages or 30)))
+    z = float(zoom or 2.0)
+    z = max(1.0, min(3.0, z))
+
+    with fitz.open(str(pdf_path)) as doc:
+        total_pages = int(getattr(doc, "page_count", 0) or 0)
+        if total_pages <= 0:
+            return []
+
+        start_i = max(0, min(total_pages - 1, p_from - 1))
+        end_i = max(0, min(total_pages - 1, p_to - 1))
+        if end_i < start_i:
+            return []
+
+        mat = fitz.Matrix(z, z)
+        for i in range(start_i, end_i + 1):
+            if len(paths) >= max_pages:
+                break
+            page = doc.load_page(i)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+            img_path = out_dir / f"page_{i+1}.png"
+            pix.save(str(img_path))
+            paths.append(str(img_path))
+
+    return paths
+
+
 def _extract_pptx_media_images(pptx_path: Path, out_dir: Path, *, max_images: int = 30) -> List[str]:
     """Extract embedded images from a PPTX (ppt/media/*) into out_dir."""
     import zipfile
@@ -3727,14 +3776,9 @@ async def ai_choose_pages_text(message: types.Message, state: FSMContext) -> Non
 
     low = raw.strip().lower()
     if low in {"-", "0", "yoq", "yo'q", "yoвЂq", "none", "no", "skip", "all", "hammasi"}:
-        await state.update_data(ai_page_from=None, ai_page_to=None)
-        image_paths = list(data.get("ai_image_paths") or [])
-        if image_paths:
-            await state.update_data(ai_max_questions=len(image_paths))
-            qcount = int(data.get("ai_question_count") or 0)
-            if qcount and qcount > len(image_paths):
-                await state.update_data(ai_question_count=len(image_paths))
-        await message.answer(t(ui_lang, "pages_cleared"))
+        await message.answer(t(ui_lang, "pages_required"))
+        await message.answer(t(ui_lang, "pages_prompt", total=total_pages or 0))
+        return
     else:
         pr = _parse_page_range(raw)
         if not pr:
@@ -4126,7 +4170,8 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
     if not data.get("ai_ui_lang"):
         ui_lang = await _get_ui_lang(int(getattr(user, "id", 0) or 0))
     text = str(data.get("ai_text") or "").strip()
-    image_paths: List[str] = list(data.get("ai_image_paths") or [])
+    orig_image_paths: List[str] = list(data.get("ai_image_paths") or [])
+    image_paths: List[str] = list(orig_image_paths)
     topic = str(data.get("ai_topic") or "").strip()
     difficulty = str(data.get("ai_difficulty") or "").strip().lower() or "mixed"
     title = str(data.get("ai_title") or "AI Quiz").strip()
@@ -4144,8 +4189,8 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
     quota_kind = 'topic' if mode == 'topic' else 'file'
     reservation: Optional[dict] = None
 
-    # Apply optional page-range selection for scanned PDFs (images).
-    if image_paths and page_from >= 1 and page_to >= page_from:
+    # Apply optional page-range selection for scanned PDFs (images) ONLY when images come from state.
+    if orig_image_paths and page_from >= 1 and page_to >= page_from:
         start_i = max(1, page_from)
         end_i = min(len(image_paths), page_to)
         if end_i >= start_i:
@@ -4153,9 +4198,15 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
         else:
             image_paths = []
 
-    if not text and not image_paths and not topic:
+    if not text and not image_paths and not topic and not pdf_path and not pptx_path:
         await state.clear()
         await bot.send_message(chat_id, t(ui_lang, "no_input_for_ai"))
+        return
+
+    # PDF/PPTX fayllar uchun sahifa oralig'i majburiy.
+    if (pdf_path or pptx_path) and not (page_from >= 1 and page_to >= page_from):
+        await state.clear()
+        await bot.send_message(chat_id, t(ui_lang, "pages_required"))
         return
 
     # Check quota without consuming. Consume only after AI returns successfully.
@@ -4169,16 +4220,17 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
     msg = await bot.send_message(chat_id, t(ui_lang, "ai_working"))
     quiz_id: Optional[int] = None
     try:
+        use_paths: List[str] = []
         if image_paths:
             # One question per image (e.g., scanned PDF pages).
             use_paths = [str(p) for p in image_paths[:question_count] if str(p).strip()]
             questions = await ai_service.generate_quiz_from_images(use_paths, output_language=output_language)
             for q, p in zip(questions, use_paths):
                 q["image_path"] = p
-        elif text:
-            use_paths = []
-            use_text = text
-            if pptx_path and page_from >= 1 and page_to >= page_from:
+        elif pdf_path or pptx_path:
+            # File-mode PDF/PPTX: extract ONLY selected pages/slides, then generate. If no text, fall back to vision.
+            use_text = ""
+            if pptx_path:
                 try:
                     use_text = await asyncio.to_thread(
                         _extract_pptx_text_range,
@@ -4189,9 +4241,39 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                     )
                 except Exception as exc:
                     raise AIServiceError(f"PPTX slaydlardan matn ajratib bo'lmadi: {exc}") from exc
+
                 if len(use_text.strip()) < 200:
-                    raise AIServiceError("Tanlangan slaydlardan matn topilmadi. Boshqa slayd oralig'ini tanlang.")
-            elif pdf_path and page_from >= 1 and page_to >= page_from:
+                    try:
+                        provider = ai_service._pick_provider()
+                    except AIServiceError as exc:
+                        raise
+                    if provider != "gemini":
+                        raise AIServiceError(t(ui_lang, "scan_pdf_need_gemini"))
+
+                    out_dir = _DOWNLOAD_DIR / f"scan_{uuid.uuid4().hex}"
+                    max_images = int(os.getenv("PPTX_SCAN_MAX_IMAGES", "30") or 30)
+                    image_paths = await asyncio.to_thread(
+                        _extract_pptx_media_images,
+                        Path(pptx_path),
+                        out_dir,
+                        max_images=max_images,
+                    )
+                    if not image_paths:
+                        raise AIServiceError(t(ui_lang, "scan_pdf_no_images"))
+
+                    use_paths = [str(p) for p in image_paths[:question_count] if str(p).strip()]
+                    questions = await ai_service.generate_quiz_from_images(use_paths, output_language=output_language)
+                    for q, p in zip(questions, use_paths):
+                        q["image_path"] = p
+                else:
+                    questions = await ai_service.generate_quiz_from_text(
+                        use_text,
+                        question_count=question_count,
+                        output_language=output_language,
+                        difficulty=difficulty,
+                        focus_topic=topic,
+                    )
+            else:
                 try:
                     use_text = await asyncio.to_thread(
                         _extract_pdf_text_range,
@@ -4202,23 +4284,60 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                     )
                 except Exception as exc:
                     raise AIServiceError(f"PDF sahifalaridan matn ajratib bo'lmadi: {exc}") from exc
+
                 if len(use_text.strip()) < 200:
-                    raise AIServiceError("Tanlangan sahifalardan matn topilmadi. Boshqa sahifa oralig'ini tanlang.")
+                    try:
+                        provider = ai_service._pick_provider()
+                    except AIServiceError as exc:
+                        raise
+                    if provider != "gemini":
+                        raise AIServiceError(t(ui_lang, "scan_pdf_need_gemini"))
+
+                    out_dir = _DOWNLOAD_DIR / f"scan_{uuid.uuid4().hex}"
+                    max_pages = int(os.getenv("PDF_SCAN_MAX_PAGES", "30") or 30)
+                    zoom = float(os.getenv("PDF_SCAN_ZOOM", "2.0") or 2.0)
+                    image_paths = await asyncio.to_thread(
+                        _render_pdf_page_range_to_images,
+                        Path(pdf_path),
+                        out_dir,
+                        page_from,
+                        page_to,
+                        max_pages=max_pages,
+                        zoom=zoom,
+                    )
+                    if not image_paths:
+                        raise AIServiceError(t(ui_lang, "scan_pdf_no_images"))
+
+                    use_paths = [str(p) for p in image_paths[:question_count] if str(p).strip()]
+                    questions = await ai_service.generate_quiz_from_images(use_paths, output_language=output_language)
+                    for q, p in zip(questions, use_paths):
+                        q["image_path"] = p
+                else:
+                    questions = await ai_service.generate_quiz_from_text(
+                        use_text,
+                        question_count=question_count,
+                        output_language=output_language,
+                        difficulty=difficulty,
+                        focus_topic=topic,
+                    )
+        elif text:
             questions = await ai_service.generate_quiz_from_text(
-                use_text,
+                text,
                 question_count=question_count,
                 output_language=output_language,
                 difficulty=difficulty,
                 focus_topic=topic,
             )
         else:
-            use_paths = []
             questions = await ai_service.generate_quiz_from_topic(
                 topic,
                 question_count=question_count,
                 output_language=output_language,
                 difficulty=difficulty,
             )
+
+        if not questions:
+            raise AIServiceError("Savollar chiqmadi. Iltimos, sahifa oralig'ini o'zgartirib qayta urinib ko'ring.")
 
         reservation = await reserve_user_quota(user.id, quota_kind)
 
@@ -4280,6 +4399,8 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
             est=est,
             id=int(quiz_id or 0),
         )
+        if len(questions) < int(question_count or 0):
+            text_out = text_out + "\n\n" + t(ui_lang, "ai_partial", wanted=int(question_count), made=int(len(questions)))
         await msg.edit_text(
             text_out,
             reply_markup=_kb_quiz_share(
@@ -4700,6 +4821,43 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
                 topic = (m.group(1) or "").strip()
             elif len(caption) <= 120:
                 topic = caption
+
+        # PDF/PPTX: sahifa oralig'ini majburiy tanlatamiz, shunda butun faylni ajratib/tahlil qilib vaqt ketmaydi.
+        if suffix in {".pdf", ".pptx"}:
+            pages_total = 0
+            try:
+                if suffix == ".pdf":
+                    pages_total = await asyncio.to_thread(_pdf_page_count, local_path)
+                else:
+                    pages_total = await asyncio.to_thread(_pptx_slide_count, local_path)
+            except Exception:
+                pages_total = 0
+
+            session_id = uuid.uuid4().hex
+            data_out: Dict[str, Any] = dict(
+                ai_session_id=session_id,
+                ai_mode="file",
+                ai_difficulty="",
+                ai_ui_lang=ui_lang,
+                ai_text="",
+                ai_title=Path(file_name).stem,
+                ai_chat_id=message.chat.id,
+                ai_chat_type=message.chat.type,
+                ai_user_id=message.from_user.id if message.from_user else 0,
+                ai_topic=topic,
+                ai_pages_total=int(pages_total or 0),
+                ai_pages_return="count",
+            )
+            if suffix == ".pdf":
+                data_out["ai_pdf_path"] = str(local_path)
+            else:
+                data_out["ai_pptx_path"] = str(local_path)
+
+            await state.update_data(**data_out)
+            await state.set_state(AIQuizStates.choose_pages)
+            await status.edit_text(t(ui_lang, "pages_prompt", total=int(pages_total or 0)))
+            cleanup_local = False
+            return
 
         await status.edit_text(t(ui_lang, "extracting_text"))
         text = await asyncio.to_thread(extract_text_from_file, str(local_path))

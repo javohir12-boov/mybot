@@ -27,7 +27,7 @@
   "btn_newquiz": "새 퀴즈",
   "btn_next": "다음",
   "btn_no_translate": "번역 안 함(원문)",
-  "btn_pages_optional": "페이지(선택)",
+  "btn_pages_optional": "페이지",
   "btn_pay": "????",
   "btn_premium": "????",
   "btn_premium_approve": "??",
@@ -122,7 +122,8 @@
   "pages_cleared": "페이지 범위를 지웠습니다(전체 페이지).",
   "pages_invalid": "페이지 범위가 올바르지 않습니다. 1..{total} 를 사용하세요. 예: 20-30.",
   "pages_line": "페이지: {p_from}-{p_to}\n",
-  "pages_prompt": "선택: 사용할 페이지 범위는? (1..{total})\n예: `20-30` 또는 `20`\n지우려면 `0`을 보내세요.",
+  "pages_prompt": "사용할 페이지 범위는? (1..{total})\n예: `20-30` 또는 `20`",
+  "pages_required": "페이지 범위를 반드시 선택해야 합니다.",
   "pages_set": "페이지 저장됨: {p_from}-{p_to}",
   "participants_joined": "참가자(참가): {n}",
   "payment_card_info": "?? ??:\n{card}\n???: {holder}\n\n???: {plan}\n??: {price} UZS\n\n?? ? ???/????? ?????.",
@@ -184,6 +185,7 @@
   "total_questions": "전체 문항: {n}",
   "ui_lang_choose": "인터페이스 언어를 선택하세요:",
   "ui_lang_saved": "저장되었습니다. 인터페이스 언어: {lang_name}",
-  "upload_hint": "파일을 보내세요 (.pdf / .docx / .pptx / .txt).\nPDF의 경우 페이지 범위도 선택할 수 있습니다(페이지(선택)).\n그다음 설정을 선택하세요.",
+  "upload_hint": "파일을 보내세요 (.pdf / .docx / .pptx / .txt).\nPDF/PPTX의 경우 페이지 범위를 반드시 선택해야 합니다.\n그다음 설정을 선택하세요.",
+  "ai_partial": "참고: 요청 {wanted}, 생성 {made}.",
   "upload_hint_noai": "퀴즈 파일을 보내세요 (.txt / .json / .docx / .pptx / .pdf).\n파일에는 이미 문항이 있어야 합니다: 질문 + A/B/C/D 옵션 + Answer.\n예:\n1) 질문?\nA) ...\nB) ...\nC) ...\nD) ...\nAnswer: B"
 }

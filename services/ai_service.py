@@ -4,6 +4,7 @@ import os
 import math
 import random
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -808,6 +809,13 @@ class AIService:
             uniq.append(q)
 
         # If the model returned fewer than requested, try to fill the gap (bounded retries).
+        started = time.monotonic()
+        default_budget = 90
+        if question_count >= 40:
+            default_budget = 120
+        fill_budget_sec = int(os.getenv("AI_TEXT_TOTAL_BUDGET_SEC", str(default_budget)) or default_budget)
+        fill_budget_sec = max(10, min(600, fill_budget_sec))
+
         max_retries = int(os.getenv("AI_FILL_RETRIES", "4") or 4)
         max_retries = max(0, min(8, max_retries))
         # Allow enough attempts for big counts; otherwise we might silently return far fewer questions.
@@ -817,6 +825,8 @@ class AIService:
         )
         tries = 0
         while len(uniq) < question_count and tries < max_iters:
+            if (time.monotonic() - started) > float(fill_budget_sec):
+                break
             tries += 1
             remaining = question_count - len(uniq)
             if remaining <= 0:
@@ -866,10 +876,9 @@ class AIService:
                 seen.add(key)
                 uniq.append(q)
 
-        if len(uniq) < question_count:
+        if not uniq:
             raise AIServiceError(
-                f"AI savollarni to'liq qaytara olmadi: {len(uniq)}/{question_count}. "
-                "Kamroq savol sonini tanlang yoki matn/hujjatni qisqartiring."
+                "AI savol qaytarmadi. Matnni qisqartirib yoki sahifa oralig'ini tanlab, qayta urinib ko'ring."
             )
         return uniq[:question_count]
 
@@ -922,6 +931,13 @@ class AIService:
             seen.add(key)
             uniq.append(q)
 
+        started = time.monotonic()
+        default_budget = 75
+        if question_count >= 40:
+            default_budget = 110
+        fill_budget_sec = int(os.getenv("AI_TOPIC_TOTAL_BUDGET_SEC", str(default_budget)) or default_budget)
+        fill_budget_sec = max(10, min(600, fill_budget_sec))
+
         max_retries = int(os.getenv("AI_FILL_RETRIES", "4") or 4)
         max_retries = max(0, min(8, max_retries))
         max_iters = max(
@@ -930,6 +946,8 @@ class AIService:
         )
         tries = 0
         while len(uniq) < question_count and tries < max_iters:
+            if (time.monotonic() - started) > float(fill_budget_sec):
+                break
             tries += 1
             remaining = question_count - len(uniq)
             if remaining <= 0:
@@ -980,11 +998,8 @@ class AIService:
                         continue
                     seen.add(key)
                     uniq.append(q)
-        if len(uniq) < question_count:
-            raise AIServiceError(
-                f"AI mavzu bo'yicha savollarni to'liq qaytara olmadi: {len(uniq)}/{question_count}. "
-                "Kamroq savol sonini tanlang yoki mavzuni aniqroq yozing."
-            )
+        if not uniq:
+            raise AIServiceError("AI savol qaytarmadi. Mavzuni aniqroq yozing va qayta urinib ko'ring.")
         return uniq[:question_count]
 
     async def generate_quiz_from_images(
@@ -1254,6 +1269,7 @@ class AIService:
         system_prompt = (
             "Sen professional testologsan. Berilgan matn asosida ko'p tanlovli test yarat.\n"
             f"- Savollar soni: {question_count}\n"
+            "- Muhim: EXACTLY shu miqdorda savol qaytar (ro'yxat uzunligi aynan Savollar soni bo'lsin)\n"
             "- Har savolda 4 ta variant bo'lsin\n"
             "- Variantlar bir xil uslubda bo'lsin (hammasi ibora yoki hammasi 1 gap)\n"
             "- Variantlar uzunligi bir-biriga yaqin bo'lsin: eng uzun va eng qisqa variant farqi 2-3 so'zdan oshmasin\n"
@@ -1351,8 +1367,8 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
 
         user_prompt = f"{extra_instructions}\n\nMavzu: {topic}".strip()
 
-        topic_temp = _safe_float_env("OPENAI_TOPIC_TEMPERATURE", "OPENAI_TEMPERATURE", default=0.35)
-        topic_temp = max(0.0, min(1.0, float(topic_temp)))
+        topic_temperature = _safe_float_env("OPENAI_TOPIC_TEMPERATURE", "OPENAI_TEMPERATURE", default=0.35)
+        topic_temperature = max(0.0, min(1.0, float(topic_temperature)))
 
         try:
             response = await asyncio.wait_for(
@@ -1362,7 +1378,7 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    temperature=topic_temp,
+                    temperature=topic_temperature,
                     response_format={"type": "json_object"},
                 ),
                 timeout=total_timeout,
@@ -1425,6 +1441,7 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
         prompt = (
             "Sen professional testologsan. Berilgan matn asosida ko'p tanlovli test yarat.\n"
             f"- Savollar soni: {question_count}\n"
+            "- Muhim: EXACTLY shu miqdorda savol qaytar (ro'yxat uzunligi aynan Savollar soni bo'lsin)\n"
             "- Har savolda 4 ta variant bo'lsin\n"
             "- Variantlar bir xil uslubda bo'lsin (hammasi ibora yoki hammasi 1 gap)\n"
             "- Variantlar uzunligi bir-biriga yaqin bo'lsin: eng uzun va eng qisqa variant farqi 2-3 so'zdan oshmasin\n"

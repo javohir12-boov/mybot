@@ -27,7 +27,7 @@
   "btn_newquiz": "Yeni test",
   "btn_next": "Sonraki",
   "btn_no_translate": "Çeviri yok (orijinal)",
-  "btn_pages_optional": "Sayfalar (isteğe bağlı)",
+  "btn_pages_optional": "Sayfalar",
   "btn_pay": "Odeme yap",
   "btn_premium": "Premium",
   "btn_premium_approve": "Onayla",
@@ -122,7 +122,8 @@
   "pages_cleared": "Sayfa aralığı temizlendi (tüm sayfalar).",
   "pages_invalid": "Geçersiz sayfa aralığı. 1..{total} kullanın. Örnek: 20-30.",
   "pages_line": "Sayfalar: {p_from}-{p_to}\n",
-  "pages_prompt": "İsteğe bağlı: Hangi sayfaları kullanayım? (1..{total})\nÖrnek: `20-30` veya `20`\nTemizlemek için `0` gönderin.",
+  "pages_prompt": "Hangi sayfaları kullanayım? (1..{total})\nÖrnek: `20-30` veya `20`",
+  "pages_required": "Sayfa aralığı seçimi zorunludur.",
   "pages_set": "Sayfalar kaydedildi: {p_from}-{p_to}",
   "participants_joined": "Katılımcılar (Katıl): {n}",
   "payment_card_info": "Odeme icin kart:\n{card}\nSahibi: {holder}\n\nPaket: {plan}\nFiyat: {price} UZS\n\nOdeme yapin ve sonra makbuzu/ekran goruntusunu gonderin.",
@@ -184,6 +185,7 @@
   "total_questions": "Toplam soru: {n}",
   "ui_lang_choose": "Arayüz dilini seçin:",
   "ui_lang_saved": "Kaydedildi. Arayüz dili: {lang_name}",
-  "upload_hint": "Bir dosya gönderin (.pdf / .docx / .pptx / .txt).\nPDF için sayfa aralığı da seçebilirsiniz (Sayfalar (isteğe bağlı)).\nSonra ayarları seçin.",
+  "upload_hint": "Bir dosya gönderin (.pdf / .docx / .pptx / .txt).\nPDF/PPTX için sayfa aralığı seçimi zorunludur.\nSonra ayarları seçin.",
+  "ai_partial": "Not: istenen {wanted}, oluşturulan {made}.",
   "upload_hint_noai": "Bir test dosyası gönderin (.txt / .json / .docx / .pptx / .pdf).\nDosyada hazır sorular olmalı: soru + A/B/C/D seçenekleri + Answer.\nÖrnek:\n1) Soru?\nA) ...\nB) ...\nC) ...\nD) ...\nAnswer: B"
 }

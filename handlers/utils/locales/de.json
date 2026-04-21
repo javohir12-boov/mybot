@@ -27,7 +27,7 @@
   "btn_newquiz": "Neues Quiz",
   "btn_next": "Weiter",
   "btn_no_translate": "Keine Übersetzung (Original)",
-  "btn_pages_optional": "Seiten (optional)",
+  "btn_pages_optional": "Seiten",
   "btn_pay": "Bezahlen",
   "btn_premium": "Premium",
   "btn_premium_approve": "Bestaetigen",
@@ -122,7 +122,8 @@
   "pages_cleared": "Seitenbereich gelöscht (alle Seiten).",
   "pages_invalid": "Ungültiger Seitenbereich. Nutze 1..{total}. Beispiel: 20-30.",
   "pages_line": "Seiten: {p_from}-{p_to}\n",
-  "pages_prompt": "Optional: Welche Seiten soll ich verwenden? (1..{total})\nBeispiel: `20-30` oder `20`\nSende `0`, um zu löschen.",
+  "pages_prompt": "Welche Seiten soll ich verwenden? (1..{total})\nBeispiel: `20-30` oder `20`",
+  "pages_required": "Die Auswahl eines Seitenbereichs ist erforderlich.",
   "pages_set": "Seiten gespeichert: {p_from}-{p_to}",
   "participants_joined": "Teilnehmer (Join): {n}",
   "payment_card_info": "Zahlungskarte:\n{card}\nInhaber: {holder}\n\nPlan: {plan}\nPreis: {price} UZS\n\nBezahle und sende dann den Beleg/Screenshot.",
@@ -184,6 +185,7 @@
   "total_questions": "Gesamtfragen: {n}",
   "ui_lang_choose": "Oberflächensprache wählen:",
   "ui_lang_saved": "Gespeichert. Oberflächensprache: {lang_name}",
-  "upload_hint": "Sende eine Datei (.pdf / .docx / .pptx / .txt).\nFür PDFs kannst du auch einen Seitenbereich wählen (Seiten (optional)).\nDann wähle die Einstellungen.",
+  "upload_hint": "Sende eine Datei (.pdf / .docx / .pptx / .txt).\nFür PDF/PPTX ist ein Seitenbereich erforderlich.\nDann wähle die Einstellungen.",
+  "ai_partial": "Hinweis: angefordert {wanted}, erstellt {made}.",
   "upload_hint_noai": "Sende eine Quiz-Datei (.txt / .json / .docx / .pptx / .pdf).\nDie Datei muss bereits Fragen enthalten: Frage + A/B/C/D Optionen + Answer.\nBeispiel:\n1) Frage?\nA) ...\nB) ...\nC) ...\nD) ...\nAnswer: B"
 }

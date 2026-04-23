@@ -221,6 +221,34 @@ def _difficulty_instruction(difficulty: str) -> str:
         return "Savollar asosan QIYIN bo'lsin (advanced)."
     return "Savollar turli qiyinlikda bo'lsin (oson, o'rta, qiyin)."
 
+def _topic_coverage_instruction(topic: str, question_count: int) -> str:
+    qn = max(1, int(question_count or 1))
+    subtopics = min(8, max(4, qn))
+    max_per_subtopic = 1 if qn <= 8 else 2
+    return (
+        f"Mavzuni oldin ichki bo'limlarga ajrat: kamida {subtopics} ta submavzu yoki bilim nuqtasi tuz.\n"
+        "Savollar butun mavzuni keng qamrasin; bir xil faktni qayta so'ramang.\n"
+        f"Bir submavzudan ko'pi bilan {max_per_subtopic} ta savol tuz.\n"
+        "Quyidagi savol turlarini aralashtir: ta'rif, sabab-oqibat, taqqoslash, amaliy qo'llash, xato/topshiriq tahlili, misol-vaziyat, tasnif, tarixiy yoki mantiqiy ketma-ketlik (mavzuga mos bo'lsa).\n"
+        "Savollarni faqat mavzu nomini qayta-qayta takrorlab tuzma. Savolning birinchi 2-3 so'zida mavzu nomi doim turmasin.\n"
+        "Agar mavzu keng bo'lsa, uning asosiy bo'limlari, tushunchalari, jarayonlari, elementlari va qo'llanishlari bo'yicha savollarni tengroq taqsimla.\n"
+        "Agar mavzu adabiyot, asar, film yoki tarixiy hodisa bo'lsa, personajlar/ishtirokchilar, voqealar, g'oya, kontekst, sabab, oqibat va ramziy ma'nolarni qamra.\n"
+        "Agar mavzu fan/texnologiya bo'lsa, atamalar, funksiyalar, qismlar, jarayonlar, farqlar, qo'llanish va tipik xatolarni qamra.\n"
+        f"Har bir savol to'g'ridan-to'g'ri \"{topic}\" deb boshlanishi shart emas; tabiiy va turli uslubda yoz."
+    )
+
+
+def _intent_instruction() -> str:
+    return (
+        "REAL user intentni tushun: faqat kalit so'zlarga emas, foydalanuvchining yashirin maqsadiga qarab savol tuz.\n"
+        "Never create random, generic, meaningless questions.\n"
+        "Savollar tabiiy, relevant, human-like, engaging, clear va short bo'lsin.\n"
+        "Agar foydalanuvchi sevgi, crush, boyfriend, girlfriend, partner yoki friendship haqida test istasa: savollar sevimli narsalar, odatlar, xotiralar, likes/dislikes, xarakter va future plans haqida bo'lsin.\n"
+        "Agar so'rov school subjects, exams, science, history, math yoki educationga oid bo'lsa: aniq va ishonchli educational quiz tuz.\n"
+        "Agar so'rov fun, party, challenge, jokes yoki entertainment uchun bo'lsa: entertaining va qiziqarli quiz tuz.\n"
+        "Agar so'rov business, marketing, startup yoki careerga oid bo'lsa: practical va real-life quiz tuz.\n"
+        "Agar intent noaniq bo'lsa, eng ehtimolli maqsadni tanla va shunga mos savol uslubini qo'lla; savollarni generic qilib yuborma."
+    )
 def _topic_keywords(topic: str) -> List[str]:
     raw = (topic or "").strip().lower()
     if not raw:
@@ -896,6 +924,8 @@ class AIService:
 
         lang_instruction = _language_instruction(output_language)
         diff_extra_topic = _difficulty_instruction(difficulty).strip()
+        coverage_extra_topic = _topic_coverage_instruction(topic, question_count).strip()
+        intent_extra = _intent_instruction().strip()
 
         default_batch_size = 10
         if question_count >= 25:
@@ -910,14 +940,14 @@ class AIService:
                 topic,
                 min(question_count, batch_size),
                 lang_instruction=lang_instruction,
-                extra_instructions=diff_extra_topic,
+                extra_instructions=(intent_extra + "\n\n" + coverage_extra_topic + ("\n\n" + diff_extra_topic if diff_extra_topic else "")).strip(),
             )
         elif provider == "gemini":
             questions = await self._generate_gemini_topic(
                 topic,
                 min(question_count, batch_size),
                 lang_instruction=lang_instruction,
-                extra_instructions=diff_extra_topic,
+                extra_instructions=(intent_extra + "\n\n" + coverage_extra_topic + ("\n\n" + diff_extra_topic if diff_extra_topic else "")).strip(),
             )
         else:
             raise AIServiceError(f"Unknown AI provider: {provider}")
@@ -959,6 +989,10 @@ class AIService:
 
             avoid = "\n".join(f"- {q['question']}" for q in uniq[:12] if q.get("question"))
             extra = "Quyidagi savollarni takrorlamang:\n" + avoid if avoid else ""
+            if intent_extra:
+                extra = (intent_extra + ("\n\n" + extra if extra else "")).strip()
+            if coverage_extra_topic:
+                extra = (coverage_extra_topic + ("\n\n" + extra if extra else "")).strip()
             if diff_extra_topic:
                 extra = (diff_extra_topic + ("\n\n" + extra if extra else "")).strip()
 
@@ -1268,6 +1302,7 @@ class AIService:
 
         system_prompt = (
             "Sen professional testologsan. Berilgan matn asosida ko'p tanlovli test yarat.\n"
+            f"- {_intent_instruction()}\n"
             f"- Savollar soni: {question_count}\n"
             "- Muhim: EXACTLY shu miqdorda savol qaytar (ro'yxat uzunligi aynan Savollar soni bo'lsin)\n"
             "- Har savolda 4 ta variant bo'lsin\n"
@@ -1346,6 +1381,7 @@ class AIService:
         if total_timeout <= 0:
             total_timeout = min(180.0, timeout_sec + 20.0)
         system_prompt = f"""Sen professional testologsan. Berilgan MAVZU bo'yicha ko'p tanlovli test yarat.
+- {_intent_instruction()}
 - Savollar soni: {question_count}
 - Mavzuni KENG qamrab ol: asosiy tushunchalar, sabab-oqibat, taqqoslash, amaliy qo'llanish, tipik xatolar, terminlar/ta'riflar, klassifikatsiya (mavzuga mos bo'lsa).
 - Agar mavzu kitob/roman/film/spektakl nomi bo'lsa: syujet, qahramonlar, voqealar ketma-ketligi, konflikt, mavzular (tema), muallif/yaratuvchi, davr/kontekst, ramzlar bo'yicha savollar tuz.
@@ -1354,6 +1390,9 @@ class AIService:
 - Agar aniq faktga ishonching komil bo'lmasa, u faktga asoslangan savol tuzma.
 - Savollar bir xil qolipda bo'lmasin: savolning boshlanishi va uslubi turlicha bo'lsin (hammasi bir xil so'z bilan boshlanmasin).
 - Mavzu so'zi bilan har doim boshlamang. (Masalan, 'Olma ...' deb ketma-ket boshlamang.)
+- Avval mavzuning ichki bo'limlari (submavzulari) bo'yicha coverage plan tuz, keyin savollarni shu plan bo'yicha tengroq tarqat.
+- Bir xil mazmundagi savolni boshqa so'z bilan qayta yozma; har savol alohida bilim nuqtasini tekshirsin.
+- Savollarni ta'rif, taqqoslash, sabab-oqibat, amaliy qo'llash, xato topish va misol/vaziyat usullarida aralashtir.
 - Har savolda 4 ta variant bo'lsin
 - Savollar bir xil qolipda bo'lmasin: savolning boshlanishi/uslubi turlicha bo'lsin
 - Muhim: EXACTLY shu miqdorda savol qaytar (ro'yxat uzunligi aynan Savollar soni bo'lsin)
@@ -1371,7 +1410,7 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
 
         user_prompt = f"{extra_instructions}\n\nMavzu: {topic}".strip()
 
-        topic_temperature = _safe_float_env("OPENAI_TOPIC_TEMPERATURE", "OPENAI_TEMPERATURE", default=0.35)
+        topic_temperature = _safe_float_env("OPENAI_TOPIC_TEMPERATURE", "OPENAI_TEMPERATURE", default=0.5)
         topic_temperature = max(0.0, min(1.0, float(topic_temperature)))
 
         try:
@@ -1561,6 +1600,7 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
 
         prompt = (
             "Sen professional testologsan. Berilgan MAVZU bo'yicha ko'p tanlovli test yarat.\n"
+            f"- {_intent_instruction()}\n"
             f"- Savollar soni: {question_count}\n"
             "- Agar mavzu kitob/roman/film/spektakl nomi bo'lsa: syujet, qahramonlar, voqealar ketma-ketligi, konflikt, mavzular (tema), muallif/yaratuvchi, davr/kontekst, ramzlar bo'yicha savollar tuz.\n"
             "- Agar mavzu ibora/metafora bo'lsa: ma'nosi, ishlatilish konteksti, to'g'ri/noto'g'ri talqinlar, sinonim/antonim, misollar bo'yicha savollar tuz.\n"
@@ -1588,7 +1628,7 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
                     resp = model.generate_content(
                         prompt,
                         generation_config={
-                            "temperature": 0.2,
+                            "temperature": 0.45,
                             "response_mime_type": "application/json",
                         },
                     )

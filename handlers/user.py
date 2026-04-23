@@ -40,6 +40,7 @@ from services.database import (
     get_quiz_attempt_stats,
     get_quiz_summary,
     get_quiz_with_questions,
+    get_user_counts_summary,
     get_user_quota_status,
     grant_user_premium,
     list_user_quizzes,
@@ -1095,7 +1096,7 @@ async def _run_quiz(bot: Bot, run: QuizRun) -> None:
         _ACTIVE_RUNS.pop(run.run_id, None)
 
 
-def _kb_main_menu(ui_lang: str) -> types.InlineKeyboardMarkup:
+def _kb_main_menu(ui_lang: str, *, user_id: int = 0) -> types.InlineKeyboardMarkup:
     ui_lang = norm_ui_lang(ui_lang)
     kb = InlineKeyboardBuilder()
 
@@ -1105,8 +1106,12 @@ def _kb_main_menu(ui_lang: str) -> types.InlineKeyboardMarkup:
     kb.button(text=t(ui_lang, "btn_newquiz"), callback_data="menu_newquiz")
     kb.button(text=t(ui_lang, "btn_ui_lang"), callback_data="menu_ui_language")
     kb.button(text=t(ui_lang, "btn_premium"), callback_data="menu_premium")
+    if int(user_id or 0) in set(int(x) for x in (ADMIN_IDS or [])):
+        kb.button(text=t(ui_lang, "btn_admin_users"), callback_data="menu_admin_users")
 
-    if AI_ENABLED:
+    if int(user_id or 0) in set(int(x) for x in (ADMIN_IDS or [])):
+        kb.adjust(2, 2, 1, 1)
+    elif AI_ENABLED:
         kb.adjust(2, 2, 1)
     else:
         kb.adjust(2, 2, 1)
@@ -1293,7 +1298,7 @@ async def cmd_start_deeplink(
         return
 
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
-    await message.answer(get_about_text(ui_lang), reply_markup=_kb_main_menu(ui_lang))
+    await message.answer(get_about_text(ui_lang), reply_markup=_kb_main_menu(ui_lang, user_id=message.from_user.id if message.from_user else 0))
 
 
 @router.message(CommandStart())
@@ -1307,7 +1312,7 @@ async def cmd_start(message: types.Message, state: FSMContext, bot: Bot) -> None
         )
         await get_or_create_user_settings(user_id=message.from_user.id)
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
-    await message.answer(get_about_text(ui_lang), reply_markup=_kb_main_menu(ui_lang))
+    await message.answer(get_about_text(ui_lang), reply_markup=_kb_main_menu(ui_lang, user_id=message.from_user.id if message.from_user else 0))
 
 
 @router.message(Command("menu"))
@@ -1315,7 +1320,7 @@ async def cmd_menu(message: types.Message, bot: Bot) -> None:
     if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
         return
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
-    await message.answer(t(ui_lang, "menu_help"), reply_markup=_kb_main_menu(ui_lang))
+    await message.answer(t(ui_lang, "menu_help"), reply_markup=_kb_main_menu(ui_lang, user_id=message.from_user.id if message.from_user else 0))
 
 
 @router.callback_query(F.data == "check_sub")
@@ -1336,7 +1341,7 @@ async def check_subscription(call: types.CallbackQuery, bot: Bot) -> None:
 
     await call.answer(t(ui_lang, "sub_check_ok"), show_alert=False)
     if call.message:
-        await call.message.answer(get_about_text(ui_lang), reply_markup=_kb_main_menu(ui_lang))
+        await call.message.answer(get_about_text(ui_lang), reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0))
 
 
 
@@ -1884,7 +1889,7 @@ async def set_ui_lang(call: types.CallbackQuery) -> None:
     _set_ui_lang_cache(call.from_user.id, ui_lang)
     await call.answer(t(ui_lang, "saved_short"))
     if call.message:
-        await call.message.answer(t(ui_lang, "ui_lang_saved", lang_name=lang_name(ui_lang)), reply_markup=_kb_main_menu(ui_lang))
+        await call.message.answer(t(ui_lang, "ui_lang_saved", lang_name=lang_name(ui_lang)), reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0))
 
 
 @router.callback_query(F.data.startswith("set_lang:"))
@@ -2113,7 +2118,7 @@ async def prem_back(call: types.CallbackQuery) -> None:
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
     if call.message:
-        await call.message.answer(t(ui_lang, "menu_help"), reply_markup=_kb_main_menu(ui_lang))
+        await call.message.answer(t(ui_lang, "menu_help"), reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0))
 
 
 @router.callback_query(F.data == 'prem_back_plans')
@@ -2725,6 +2730,30 @@ async def prem_admin_no(call: types.CallbackQuery, bot: Bot) -> None:
         pass
 
     await call.answer('Rejected')
+@router.callback_query(F.data == "menu_admin_users")
+async def menu_admin_users(call: types.CallbackQuery, bot: Bot) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id if call.from_user else 0)
+    if call.from_user.id not in set(int(x) for x in (ADMIN_IDS or [])):
+        await call.answer(t(ui_lang, 'admin_only'), show_alert=True)
+        return
+    try:
+        stats = await get_user_counts_summary()
+    except Exception as exc:
+        await call.message.answer(t(ui_lang, 'err_unexpected', err=str(exc)))
+        return
+    await call.message.answer(
+        t(
+            ui_lang,
+            'admin_users_stats',
+            total=int(stats.get('total_users') or 0),
+            joined=int(stats.get('joined_last_24h') or 0),
+            active=int(stats.get('active_users_last_24h') or 0),
+            quizzes=int(stats.get('total_quizzes') or 0),
+            attempts=int(stats.get('attempts_last_24h') or 0),
+        )
+    )
+    await call.answer()
+
 @router.callback_query(F.data == "menu_myquizzes")
 async def menu_myquizzes(call: types.CallbackQuery, bot: Bot) -> None:
     if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):

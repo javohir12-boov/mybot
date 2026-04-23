@@ -263,9 +263,9 @@ async def fetch_topic_context(topic: str, *, ui_lang: str = "uz") -> TopicContex
     if len(raw) < 3:
         return TopicContext(topic=raw, title=raw, text="", sources=[])
 
-    timeout_sec = float(os.getenv("TOPIC_CONTEXT_TIMEOUT_SEC", "4.5") or 4.5)
+    timeout_sec = float(os.getenv("TOPIC_CONTEXT_TIMEOUT_SEC", "6.5") or 6.5)
     timeout_sec = max(1.0, min(15.0, timeout_sec))
-    max_chars = int(os.getenv("TOPIC_CONTEXT_MAX_CHARS", "9000") or 9000)
+    max_chars = int(os.getenv("TOPIC_CONTEXT_MAX_CHARS", "15000") or 15000)
     max_chars = max(1500, min(60000, max_chars))
 
     # Language priority: try UI lang wiki first, then RU, then EN.
@@ -317,7 +317,7 @@ async def fetch_topic_context(topic: str, *, ui_lang: str = "uz") -> TopicContex
     used_sources: List[str] = []
     chunks: List[str] = []
     title_out = scored[0][1] or raw
-    for sc, t, txt, src in scored[:3]:
+    for sc, t, txt, src in scored[:4]:
         if not txt or src in used_sources:
             continue
         used_sources.append(src)

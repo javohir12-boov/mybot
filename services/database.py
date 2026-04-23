@@ -19,6 +19,7 @@ class User(Base):
     id = Column(BigInteger, primary_key=True)
     full_name = Column(Text, default="")
     username = Column(Text, default="")
+    created_at = Column(Text, default="")
     is_premium = Column(Boolean, default=False)
     daily_limit = Column(Integer, default=5)
     quizzes = relationship('Quiz', backref='creator')
@@ -240,7 +241,12 @@ async def get_or_create_user(user_id: int, full_name: Optional[str] = None, user
     async with async_session() as session:
         user = await session.get(User, user_id)
         if user is None:
-            user = User(id=user_id, full_name=full_name or "", username=(username or "").strip())
+            user = User(
+                id=user_id,
+                full_name=full_name or "",
+                username=(username or "").strip(),
+                created_at=_utc_now_iso(),
+            )
             session.add(user)
             await session.commit()
             return user.id
@@ -259,6 +265,37 @@ async def get_or_create_user(user_id: int, full_name: Optional[str] = None, user
         if changed:
             await session.commit()
         return int(user.id)
+
+
+
+async def get_user_counts_summary() -> dict:
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(days=1)).replace(microsecond=0).isoformat()
+
+    async with async_session() as session:
+        total_stmt = select(func.count()).select_from(User)
+        total = int((await session.execute(total_stmt)).scalar() or 0)
+
+        recent_stmt = select(func.count()).select_from(User).where(User.created_at >= since)
+        recent = int((await session.execute(recent_stmt)).scalar() or 0)
+
+        total_quizzes_stmt = select(func.count()).select_from(Quiz)
+        total_quizzes = int((await session.execute(total_quizzes_stmt)).scalar() or 0)
+
+        attempts_last_24h_stmt = select(func.count()).select_from(QuizAttempt).where(QuizAttempt.completed_at >= since)
+        attempts_last_24h = int((await session.execute(attempts_last_24h_stmt)).scalar() or 0)
+
+        active_users_last_24h_stmt = select(func.count(func.distinct(QuizAttempt.user_id))).where(QuizAttempt.completed_at >= since)
+        active_users_last_24h = int((await session.execute(active_users_last_24h_stmt)).scalar() or 0)
+
+        return {
+            'total_users': total,
+            'joined_last_24h': recent,
+            'total_quizzes': total_quizzes,
+            'attempts_last_24h': attempts_last_24h,
+            'active_users_last_24h': active_users_last_24h,
+            'since_utc': since,
+        }
 
 
 async def get_or_create_user_settings(user_id: int) -> dict:
@@ -480,6 +517,11 @@ async def init_db():
                 ]
                 for sql in add_fks:
                     await conn.exec_driver_sql(sql)
+                try:
+                    await conn.exec_driver_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TEXT DEFAULT ''")
+                    await conn.exec_driver_sql("UPDATE users SET created_at='' WHERE created_at IS NULL")
+                except Exception:
+                    pass
         except Exception as exc:
             logging.warning("Postgres bigint migration skipped/failed: %s", exc)
         # Lightweight migrations for SQLite (create_all doesn't alter existing tables).
@@ -511,6 +553,9 @@ async def init_db():
                 if "username" not in cols:
                     await conn.exec_driver_sql("ALTER TABLE users ADD COLUMN username TEXT DEFAULT ''")
                     await conn.exec_driver_sql("UPDATE users SET username='' WHERE username IS NULL")
+                if "created_at" not in cols:
+                    await conn.exec_driver_sql("ALTER TABLE users ADD COLUMN created_at TEXT DEFAULT ''")
+                    await conn.exec_driver_sql("UPDATE users SET created_at='' WHERE created_at IS NULL")
 
                 res = await conn.exec_driver_sql("PRAGMA table_info(quiz_attempts)")
                 cols = {row[1] for row in res.fetchall()}

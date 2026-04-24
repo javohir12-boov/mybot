@@ -10,6 +10,11 @@ class ImportServiceError(RuntimeError):
 
 _Q_START_RE = re.compile(r"^\s*(?:Q(?:uestion)?\s*)?(\d{1,4})\s*[).:\-\u2013\u2014]\s*(.+?)\s*$", re.IGNORECASE)
 _Q_NUM_ONLY_RE = re.compile(r"^\s*(?:Q(?:uestion)?\s*)?(\d{1,4})\s*[).:\-\u2013\u2014]\s*$", re.IGNORECASE)
+_QUESTION_ANY_RE = re.compile(
+    r"^\s*(?:Q(?:uestion)?\s*|S:\s*|№\s*)?(\d{1,4})?\s*[).:\-\u2013\u2014]?\s*(.+?)\s*$",
+    re.IGNORECASE,
+)
+_PLUS_MINUS_OPT_RE = re.compile(r"^\s*([+-])\s*[:.)\-]?\s*(.+?)\s*$")
 _OPT_RE = re.compile(
     r"^\s*(?:[-*\u2022\u25CF\u25E6\u2013\u2014]\s*)?([A-Da-d\u0410\u0430\u0411\u0431\u0412\u0432\u0413\u0433\u0421\u0441\u0414\u0434]|[1-4])\s*[\).:\-\u2013\u2014]\s*(.+?)\s*$",
     re.IGNORECASE,
@@ -189,6 +194,207 @@ def parse_quiz_from_json(data: Any, *, title_fallback: str = "") -> Tuple[str, L
 
     return title, out
 
+
+def _compact_ws(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _parse_quiz_table_rows(text: str) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    for raw in normalized.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        if re.search(r"(?i)savollar|to'g'ri\s+javob|muqobil\s+javob", line):
+            continue
+        parts = [p.strip() for p in re.split(r"\t+|\s{3,}", line) if p.strip()]
+        if len(parts) < 5:
+            continue
+        num = parts[0]
+        if not re.fullmatch(r"\d{1,4}", num):
+            continue
+        question = _compact_ws(parts[1])
+        options = [_compact_ws(p) for p in parts[2:6] if _compact_ws(p)]
+        if question and len(options) >= 4:
+            out.append(
+                {
+                    "question": question,
+                    "options": options[:4],
+                    "correct_index": 0,
+                    "explanation": "",
+                }
+            )
+    return out
+
+
+def _parse_quiz_plus_minus(text: str) -> List[Dict[str, Any]]:
+    normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    out: List[Dict[str, Any]] = []
+    q_text = ""
+    options: List[str] = []
+    correct_index: Optional[int] = None
+
+    def flush() -> None:
+        nonlocal q_text, options, correct_index
+        if q_text and len(options) == 4 and correct_index is not None:
+            out.append(
+                {
+                    "question": _compact_ws(q_text),
+                    "options": [_compact_ws(x) for x in options[:4]],
+                    "correct_index": int(correct_index),
+                    "explanation": "",
+                }
+            )
+        q_text = ""
+        options = []
+        correct_index = None
+
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+
+        m_q = _QUESTION_ANY_RE.match(line)
+        if m_q and not _PLUS_MINUS_OPT_RE.match(line) and not _OPT_RE.match(line):
+            lead = (m_q.group(2) or "").strip()
+            if lead:
+                flush()
+                q_text = lead
+                continue
+
+        if line.lower().startswith('s:'):
+            content = _compact_ws(line[2:])
+            if content:
+                q_text = _compact_ws((q_text + ' ' + content) if q_text else content)
+            continue
+
+        m_pm = _PLUS_MINUS_OPT_RE.match(line)
+        if m_pm and q_text:
+            sign = m_pm.group(1)
+            value = _compact_ws(m_pm.group(2))
+            if value:
+                if len(options) < 4:
+                    options.append(value)
+                    if sign == '+':
+                        correct_index = len(options) - 1
+                else:
+                    options[-1] = _compact_ws(options[-1] + ' ' + value)
+            continue
+
+        if q_text and options and not _QUESTION_ANY_RE.match(line):
+            options[-1] = _compact_ws(options[-1] + ' ' + line)
+            continue
+
+        if q_text and not options:
+            q_text = _compact_ws(q_text + ' ' + line)
+            continue
+
+    flush()
+    return out
+
+
+
+def _parse_quiz_unlabeled_blocks(text: str) -> List[Dict[str, Any]]:
+    raw = (text or '')
+    if _OPT_RE.search(raw) or _PLUS_MINUS_OPT_RE.search(raw):
+        return []
+
+    lines = raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    out: List[Dict[str, Any]] = []
+    q_text = ''
+    options: List[str] = []
+    correct_index: Optional[int] = None
+    pending_question_num = False
+
+    def is_number_only(value: str) -> bool:
+        token = str(value or '').strip()
+        if not token:
+            return False
+        token = token.replace('?', '').strip()
+        token = token.rstrip(').:-').strip()
+        return token.isdigit()
+
+    def flush() -> None:
+        nonlocal q_text, options, correct_index, pending_question_num
+        if q_text and len(options) == 4:
+            out.append(
+                {
+                    'question': _compact_ws(q_text),
+                    'options': [_compact_ws(x) for x in options[:4]],
+                    'correct_index': int(correct_index) if correct_index is not None else 0,
+                    'explanation': '',
+                }
+            )
+        q_text = ''
+        options = []
+        correct_index = None
+        pending_question_num = False
+
+    for raw_line in lines:
+        line = (raw_line or '').strip()
+        if not line:
+            continue
+
+        if is_number_only(line):
+            if q_text and options:
+                flush()
+            pending_question_num = True
+            continue
+
+        if _ANSWER_SECTION_RE.search(line):
+            flush()
+            continue
+
+        if line.lower().startswith('s:'):
+            content = _compact_ws(line[2:])
+            if content:
+                if q_text and options:
+                    flush()
+                q_text = content
+                pending_question_num = False
+            continue
+
+        if pending_question_num and not q_text:
+            q_text = _compact_ws(line)
+            pending_question_num = False
+            continue
+
+        m_ans = _ANSWER_RE.match(line)
+        if m_ans and q_text and len(options) == 4:
+            idx = _answer_to_index(m_ans.group(1))
+            if idx is not None:
+                correct_index = idx
+            continue
+
+        if line.lower().startswith('javob:') and q_text and len(options) == 4:
+            answer_text = _compact_ws(line.split(':', 1)[1])
+            idx = _answer_to_index(answer_text)
+            if idx is not None:
+                correct_index = idx
+            else:
+                for i, opt in enumerate(options):
+                    if _compact_ws(opt).lower() == answer_text.lower():
+                        correct_index = i
+                        break
+            continue
+
+        if not q_text:
+            continue
+
+        if len(options) < 4:
+            clean, marked = _strip_correct_marker(line)
+            options.append(_compact_ws(clean))
+            if marked and correct_index is None:
+                correct_index = len(options) - 1
+            continue
+
+        if options:
+            options[-1] = _compact_ws(options[-1] + ' ' + line)
+
+    flush()
+    return out
 
 def parse_quiz_from_text(text: str) -> List[Dict[str, Any]]:
     lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -441,8 +647,38 @@ def parse_quiz_payload(raw_text: str, *, title_fallback: str = "") -> Tuple[str,
         except Exception:
             pass
 
-    questions = parse_quiz_from_text(raw)
-    return title_fallback, questions
+    buckets: List[Dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for parser in (parse_quiz_from_text, _parse_quiz_plus_minus, _parse_quiz_table_rows, _parse_quiz_unlabeled_blocks):
+        try:
+            parsed = parser(raw)
+        except Exception:
+            parsed = []
+        for q in parsed or []:
+            question = _compact_ws(str(q.get("question") or ""))
+            options: List[str] = []
+            for raw_opt in list(q.get("options") or [])[:4]:
+                opt = _compact_ws(raw_opt)
+                m_pm = _PLUS_MINUS_OPT_RE.match(opt)
+                if m_pm:
+                    opt = _compact_ws(m_pm.group(2))
+                opt, _ = _strip_correct_marker(opt)
+                options.append(_compact_ws(opt))
+            if not question or len(options) != 4:
+                continue
+            key = (question.lower(), "|".join(o.lower() for o in options))
+            if key in seen:
+                continue
+            seen.add(key)
+            buckets.append({
+                "question": question,
+                "options": options,
+                "correct_index": int(q.get("correct_index") or 0),
+                "explanation": str(q.get("explanation") or "").strip(),
+            })
+
+    return title_fallback, buckets
 
 
 def import_format_example() -> str:
@@ -466,6 +702,14 @@ def import_format_example() -> str:
         "1 - B\n"
         "2 - 1"
     )
+
+
+
+
+
+
+
+
 
 
 

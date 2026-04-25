@@ -519,7 +519,7 @@ def _safe_float_env(*names: str, default: float) -> float:
     return float(default)
 
 
-def _normalize_quiz(data: Any) -> List[Dict[str, Any]]:
+def _normalize_quiz(data: Any, *, shuffle_options: bool = True) -> List[Dict[str, Any]]:
     def _coerce_options(raw: Any) -> List[str]:
         """Coerce common option shapes into a clean 4-item list.
 
@@ -631,14 +631,14 @@ def _normalize_quiz(data: Any) -> List[Dict[str, Any]]:
         if not question:
             continue
 
-        # Shuffle options so the correct answer isn't always A (0).
-        try:
-            perm = [0, 1, 2, 3]
-            random.shuffle(perm)
-            options = [options[i] for i in perm]
-            correct_index = int(perm.index(int(correct_index)))
-        except Exception:
-            pass
+        if shuffle_options:
+            try:
+                perm = [0, 1, 2, 3]
+                random.shuffle(perm)
+                options = [options[i] for i in perm]
+                correct_index = int(perm.index(int(correct_index)))
+            except Exception:
+                pass
 
         out.append(
             {
@@ -760,6 +760,7 @@ class AIService:
         output_language: str = "source",
         difficulty: str = "mixed",
         focus_topic: str = "",
+        shuffle_options: bool = True,
     ) -> List[Dict[str, Any]]:
         provider = self._pick_provider()
 
@@ -816,6 +817,7 @@ class AIService:
                 min(question_count, batch_size),
                 lang_instruction=lang_instruction,
                 extra_instructions=extra0,
+                shuffle_options=shuffle_options,
             )
         elif provider == "gemini":
             questions = await self._generate_gemini(
@@ -823,6 +825,7 @@ class AIService:
                 min(question_count, batch_size),
                 lang_instruction=lang_instruction,
                 extra_instructions=extra0,
+                shuffle_options=shuffle_options,
             )
         else:
             raise AIServiceError(f"Unknown AI provider: {provider}")
@@ -886,9 +889,9 @@ class AIService:
                 ask = min(to_ask, batch_size)
                 to_ask -= ask
                 if provider == "openai":
-                    tasks.append(self._generate_openai(cleaned, ask, lang_instruction=lang_instruction, extra_instructions=extra))
+                    tasks.append(self._generate_openai(cleaned, ask, lang_instruction=lang_instruction, extra_instructions=extra, shuffle_options=shuffle_options))
                 else:
-                    tasks.append(self._generate_gemini(cleaned, ask, lang_instruction=lang_instruction, extra_instructions=extra))
+                    tasks.append(self._generate_gemini(cleaned, ask, lang_instruction=lang_instruction, extra_instructions=extra, shuffle_options=shuffle_options))
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
             more_all = []
@@ -916,6 +919,7 @@ class AIService:
         question_count: int = 5,
         output_language: str = "source",
         difficulty: str = "mixed",
+        shuffle_options: bool = True,
     ) -> List[Dict[str, Any]]:
         provider = self._pick_provider()
         topic = (topic or "").strip()
@@ -941,6 +945,7 @@ class AIService:
                 min(question_count, batch_size),
                 lang_instruction=lang_instruction,
                 extra_instructions=(intent_extra + "\n\n" + coverage_extra_topic + ("\n\n" + diff_extra_topic if diff_extra_topic else "")).strip(),
+                shuffle_options=shuffle_options,
             )
         elif provider == "gemini":
             questions = await self._generate_gemini_topic(
@@ -948,6 +953,7 @@ class AIService:
                 min(question_count, batch_size),
                 lang_instruction=lang_instruction,
                 extra_instructions=(intent_extra + "\n\n" + coverage_extra_topic + ("\n\n" + diff_extra_topic if diff_extra_topic else "")).strip(),
+                shuffle_options=shuffle_options,
             )
         else:
             raise AIServiceError(f"Unknown AI provider: {provider}")
@@ -1010,6 +1016,7 @@ class AIService:
                             ask,
                             lang_instruction=lang_instruction,
                             extra_instructions=extra,
+                            shuffle_options=shuffle_options,
                         )
                     )
                 else:
@@ -1019,6 +1026,7 @@ class AIService:
                             ask,
                             lang_instruction=lang_instruction,
                             extra_instructions=extra,
+                            shuffle_options=shuffle_options,
                         )
                     )
 
@@ -1041,6 +1049,7 @@ class AIService:
         image_paths: List[str],
         *,
         output_language: str = "source",
+        shuffle_options: bool = True,
     ) -> List[Dict[str, Any]]:
         """Generate exactly 1 question per image (Gemini vision)."""
         provider = self._pick_provider()
@@ -1055,7 +1064,7 @@ class AIService:
 
         out: List[Dict[str, Any]] = []
         for p in paths:
-            q = await self._generate_gemini_image(p, lang_instruction=lang_instruction)
+            q = await self._generate_gemini_image(p, lang_instruction=lang_instruction, shuffle_options=shuffle_options)
             out.append(q)
         return out
 
@@ -1283,6 +1292,7 @@ class AIService:
         *,
         lang_instruction: str,
         extra_instructions: str = "",
+        shuffle_options: bool = True,
     ) -> List[Dict[str, Any]]:
         try:
             from openai import AsyncOpenAI
@@ -1355,7 +1365,7 @@ class AIService:
 
         content = response.choices[0].message.content or ""
         data = _load_json_from_text(content)
-        return _normalize_quiz(data)
+        return _normalize_quiz(data, shuffle_options=shuffle_options)
 
     async def _generate_openai_topic(
         self,
@@ -1364,6 +1374,7 @@ class AIService:
         *,
         lang_instruction: str,
         extra_instructions: str = "",
+        shuffle_options: bool = True,
     ) -> List[Dict[str, Any]]:
         try:
             from openai import AsyncOpenAI
@@ -1444,7 +1455,7 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
 
         content = response.choices[0].message.content or ""
         data = _load_json_from_text(content)
-        return _normalize_quiz(data)
+        return _normalize_quiz(data, shuffle_options=shuffle_options)
 
     async def _generate_gemini(
         self,
@@ -1453,6 +1464,7 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
         *,
         lang_instruction: str,
         extra_instructions: str = "",
+        shuffle_options: bool = True,
     ) -> List[Dict[str, Any]]:
         try:
             import google.generativeai as genai
@@ -1564,7 +1576,7 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
                     ) from exc
                 raise
         data = _load_json_from_text(raw)
-        return _normalize_quiz(data)
+        return _normalize_quiz(data, shuffle_options=shuffle_options)
 
     async def _generate_gemini_topic(
         self,
@@ -1573,6 +1585,7 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
         *,
         lang_instruction: str,
         extra_instructions: str = "",
+        shuffle_options: bool = True,
     ) -> List[Dict[str, Any]]:
         try:
             import google.generativeai as genai
@@ -1685,9 +1698,9 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
                     ) from exc
                 raise
         data = _load_json_from_text(raw)
-        return _normalize_quiz(data)
+        return _normalize_quiz(data, shuffle_options=shuffle_options)
 
-    async def _generate_gemini_image(self, image_path: str, *, lang_instruction: str) -> Dict[str, Any]:
+    async def _generate_gemini_image(self, image_path: str, *, lang_instruction: str, shuffle_options: bool = True) -> Dict[str, Any]:
         try:
             import google.generativeai as genai
         except ImportError as exc:
@@ -1797,7 +1810,7 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
                 raise
 
         data = _load_json_from_text(raw)
-        questions = _normalize_quiz(data)
+        questions = _normalize_quiz(data, shuffle_options=shuffle_options)
         if not questions:
             raise AIServiceError("AI did not return any valid questions from image")
         return questions[0]

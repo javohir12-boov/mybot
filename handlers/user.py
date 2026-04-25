@@ -1,6 +1,7 @@
 import asyncio
 import html
 import os
+import random
 import re
 import shutil
 import time
@@ -167,6 +168,8 @@ class QuizRun:
     output_language: str
     ui_lang: str = "uz"
     quiz_id: Optional[int] = None
+    shuffle_mode: str = "none"
+    shuffle_strategy: str = "saved"
     current_index: int = 0
     cancelled: bool = False
     started: bool = True
@@ -206,6 +209,8 @@ class PausedRun:
     open_period: int
     output_language: str
     ui_lang: str
+    shuffle_mode: str
+    shuffle_strategy: str
     current_index: int
     scores: Dict[int, UserScore]
     created_at: float
@@ -236,6 +241,8 @@ def _store_paused_run(run: QuizRun, *, user_id: int, resume_index: int) -> str:
         open_period=int(run.open_period or 30),
         output_language=str(run.output_language or "source"),
         ui_lang=str(run.ui_lang or "uz"),
+        shuffle_mode=str(run.shuffle_mode or "none"),
+        shuffle_strategy=str(run.shuffle_strategy or "saved"),
         current_index=resume_index,
         scores=dict(run.scores or {}),
         created_at=time.monotonic(),
@@ -803,10 +810,20 @@ async def _start_saved_quiz(
 
     title = str(quiz.get("title") or f"Quiz {quiz_id}")
     open_period = int(quiz.get("open_period") or 30)
+    shuffle_mode = str(quiz.get("shuffle_mode") or "none").strip().lower()
+    shuffle_strategy = _normalize_shuffle_strategy(quiz.get("shuffle_strategy") or "saved")
 
     run_id = uuid.uuid4().hex
     ct = (chat_type or "private").strip().lower()
     questions_prepared = [dict(q) for q in (questions or [])]
+    if shuffle_strategy == "runtime":
+        shuffle_questions, shuffle_options = _shuffle_mode_flags(shuffle_mode)
+        if shuffle_questions or shuffle_options:
+            questions_prepared = _apply_quiz_shuffle(
+                questions_prepared,
+                shuffle_questions=shuffle_questions,
+                shuffle_options=shuffle_options,
+            )
 
     run = QuizRun(
         run_id=run_id,
@@ -819,6 +836,8 @@ async def _start_saved_quiz(
         output_language="source",
         ui_lang=ui_lang,
         quiz_id=int(quiz_id),
+        shuffle_mode=shuffle_mode,
+        shuffle_strategy=shuffle_strategy,
         started=ct not in {"group", "supergroup"},
         participants={user.id: user.full_name or str(user.id)},
     )
@@ -1720,7 +1739,58 @@ async def quiz_edit_time_start(call: types.CallbackQuery, state: FSMContext) -> 
     await state.update_data(e_quiz_id=int(quiz_id), e_ui_lang=ui_lang)
     await state.set_state(QuizEditStates.open_period)
     if call.message:
-        await call.message.answer(t(ui_lang, "edit_time_prompt"), reply_markup=_kb_quiz_edit_cancel(quiz_id, ui_lang=ui_lang))
+        await call.message.answer(t(ui_lang, "edit_time_prompt"), reply_markup=_kb_quiz_edit_time_presets(quiz_id, ui_lang=ui_lang))
+
+
+@router.callback_query(F.data.startswith("quiz_edit_time_set:"))
+async def quiz_edit_time_set(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not call.from_user:
+        return
+    parts = str(call.data or "").split(":")
+    if len(parts) != 3:
+        ui_lang = await _get_ui_lang(call.from_user.id)
+        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        return
+
+    data = await state.get_data()
+    ui_lang = norm_ui_lang(str(data.get("e_ui_lang") or "")) or await _get_ui_lang(call.from_user.id)
+    try:
+        quiz_id = int(parts[1])
+        sec = int(parts[2])
+    except Exception:
+        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        return
+    if sec not in _TIME_PRESET_VALUES:
+        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        return
+
+    state_quiz_id = int(data.get("e_quiz_id") or 0)
+    if state_quiz_id and state_quiz_id != quiz_id:
+        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        return
+
+    summary = await get_quiz_summary(quiz_id)
+    if not summary:
+        await state.clear()
+        await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
+        return
+    if int(summary.get("creator_id") or 0) != int(call.from_user.id):
+        await state.clear()
+        await call.answer(t(ui_lang, "edit_creator_only"), show_alert=True)
+        return
+
+    await call.answer(t(ui_lang, "accepted"))
+    await update_quiz_meta(quiz_id, call.from_user.id, open_period=int(sec))
+    await state.clear()
+    if call.message:
+        await call.message.answer(t(ui_lang, "edit_saved"))
+        await _send_quiz_card_for_creator(
+            bot,
+            chat_id=call.message.chat.id,
+            chat_type=call.message.chat.type,
+            ui_lang=ui_lang,
+            quiz_id=quiz_id,
+        )
 
 
 @router.message(QuizEditStates.title)
@@ -1766,7 +1836,7 @@ async def quiz_edit_time_apply(message: types.Message, state: FSMContext, bot: B
     quiz_id = int(data.get("e_quiz_id") or 0)
     sec = _first_int(message.text or "")
     if sec is None or sec < 5 or sec > 600:
-        await message.answer(t(ui_lang, "time_invalid"))
+        await message.answer(t(ui_lang, "time_invalid"), reply_markup=_kb_quiz_edit_time_presets(quiz_id, ui_lang=ui_lang))
         return
 
     summary = await get_quiz_summary(quiz_id)
@@ -2864,6 +2934,8 @@ async def cmd_newquiz(message: types.Message, state: FSMContext, bot: Bot) -> No
 class ManualQuizStates(StatesGroup):
     title = State()
     open_period = State()
+    choose_shuffle = State()
+    choose_shuffle_strategy = State()
     question = State()
     question_image = State()
     options = State()
@@ -2886,7 +2958,12 @@ def _manual_prompt_for_state(*, ui_lang: str, state_str: str, data: Dict[str, An
     if st == ManualQuizStates.title.state or st.endswith(":title"):
         return t(ui_lang, "manual_title_prompt"), None
     if st == ManualQuizStates.open_period.state or st.endswith(":open_period"):
-        return t(ui_lang, "choose_time"), None
+        return t(ui_lang, "choose_time"), _kb_manual_time_presets(ui_lang=ui_lang)
+    if st == ManualQuizStates.choose_shuffle.state or st.endswith(":choose_shuffle"):
+        return t(ui_lang, "shuffle_prompt_manual"), _kb_manual_shuffle(ui_lang=ui_lang)
+    if st == ManualQuizStates.choose_shuffle_strategy.state or st.endswith(":choose_shuffle_strategy"):
+        mode = str(data.get("m_shuffle_mode") or "none").strip().lower()
+        return t(ui_lang, "shuffle_strategy_prompt"), _kb_manual_shuffle_strategy(mode=mode, ui_lang=ui_lang)
     if st == ManualQuizStates.question.state or st.endswith(":question"):
         questions = data.get("questions") or []
         if isinstance(questions, list) and len(questions) > 0:
@@ -2930,6 +3007,8 @@ def _manual_draft_payload(data: Dict[str, Any]) -> Dict[str, Any]:
         "m_ui_lang",
         "title",
         "m_open_period",
+        "m_shuffle_mode",
+        "m_shuffle_strategy",
         "questions",
         "current_question",
         "current_options",
@@ -3015,10 +3094,34 @@ async def manual_title(message: types.Message, state: FSMContext) -> None:
         await message.answer(t(ui_lang, "manual_title_required"))
         return
 
-    await state.update_data(title=title, questions=[], m_open_period=None)
+    await state.update_data(title=title, questions=[], m_open_period=None, m_shuffle_mode="none", m_shuffle_strategy="saved")
     await state.set_state(ManualQuizStates.open_period)
     await _persist_manual_draft(state, user_id=message.from_user.id if message.from_user else 0, chat_id=message.chat.id)
-    await message.answer(t(ui_lang, "choose_time"))
+    await message.answer(t(ui_lang, "choose_time"), reply_markup=_kb_manual_time_presets(ui_lang=ui_lang))
+
+
+@router.callback_query(F.data.startswith("m_time:"))
+async def manual_open_period_pick(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    ui_lang = norm_ui_lang(str(data.get("m_ui_lang") or ""))
+    if not data.get("m_ui_lang"):
+        ui_lang = await _get_ui_lang(call.from_user.id)
+
+    try:
+        sec = int(str(call.data or "").split(":", 1)[1])
+    except Exception:
+        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        return
+    if sec not in _TIME_PRESET_VALUES:
+        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        return
+
+    await state.update_data(m_open_period=int(sec))
+    await state.set_state(ManualQuizStates.choose_shuffle)
+    if call.message:
+        await _persist_manual_draft(state, user_id=call.from_user.id if call.from_user else 0, chat_id=call.message.chat.id)
+        await call.message.answer(t(ui_lang, "shuffle_prompt_manual"), reply_markup=_kb_manual_shuffle(ui_lang=ui_lang))
 
 
 @router.message(ManualQuizStates.open_period)
@@ -3029,12 +3132,59 @@ async def manual_open_period(message: types.Message, state: FSMContext) -> None:
         ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
     sec = _first_int(message.text or "")
     if sec is None or sec < 5 or sec > 600:
-        await message.answer(t(ui_lang, "time_invalid"))
+        await message.answer(t(ui_lang, "time_invalid"), reply_markup=_kb_manual_time_presets(ui_lang=ui_lang))
         return
     await state.update_data(m_open_period=int(sec))
-    await state.set_state(ManualQuizStates.question)
+    await state.set_state(ManualQuizStates.choose_shuffle)
     await _persist_manual_draft(state, user_id=message.from_user.id if message.from_user else 0, chat_id=message.chat.id)
-    await message.answer(t(ui_lang, "manual_first_question"))
+    await message.answer(t(ui_lang, "shuffle_prompt_manual"), reply_markup=_kb_manual_shuffle(ui_lang=ui_lang))
+
+
+@router.callback_query(F.data.startswith("m_shuffle:"))
+async def manual_choose_shuffle(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    ui_lang = norm_ui_lang(str(data.get("m_ui_lang") or ""))
+    if not data.get("m_ui_lang"):
+        ui_lang = await _get_ui_lang(call.from_user.id)
+
+    choice = str(call.data.split(":", 1)[1] if ":" in call.data else "").strip().lower()
+    if choice not in {"questions", "options", "both", "none"}:
+        choice = "none"
+
+    if choice == "none":
+        await state.update_data(m_shuffle_mode="none", m_shuffle_strategy="saved")
+        await state.set_state(ManualQuizStates.question)
+        if call.message:
+            await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
+            await call.message.answer(t(ui_lang, "manual_first_question"))
+        return
+
+    await state.update_data(m_shuffle_mode=choice)
+    await state.set_state(ManualQuizStates.choose_shuffle_strategy)
+    if call.message:
+        await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
+        await call.message.answer(
+            t(ui_lang, "shuffle_strategy_prompt"),
+            reply_markup=_kb_manual_shuffle_strategy(mode=choice, ui_lang=ui_lang),
+        )
+
+
+@router.callback_query(F.data.startswith("m_shuffle_strategy:"))
+async def manual_choose_shuffle_strategy(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    data = await state.get_data()
+    ui_lang = norm_ui_lang(str(data.get("m_ui_lang") or ""))
+    if not data.get("m_ui_lang"):
+        ui_lang = await _get_ui_lang(call.from_user.id)
+
+    choice = str(call.data.split(":", 1)[1] if ":" in call.data else "").strip().lower()
+    strategy = _normalize_shuffle_strategy(choice)
+    await state.update_data(m_shuffle_strategy=strategy)
+    await state.set_state(ManualQuizStates.question)
+    if call.message:
+        await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
+        await call.message.answer(t(ui_lang, "manual_first_question"))
 
 
 def _is_image_document(message: types.Message) -> bool:
@@ -3258,7 +3408,19 @@ async def manual_finish(call: types.CallbackQuery, state: FSMContext, bot: Bot) 
 
     open_period = int(data.get("m_open_period") or 30)
     open_period = max(5, min(600, open_period))
-    quiz_id = await create_quiz(title=title, creator_id=user.id, is_ai_generated=False, open_period=open_period)
+    m_shuffle_mode = str(data.get("m_shuffle_mode") or "none").strip().lower()
+    m_shuffle_strategy = _normalize_shuffle_strategy(data.get("m_shuffle_strategy") or "saved")
+    m_shuffle_questions, m_shuffle_options = _shuffle_mode_flags(m_shuffle_mode)
+    if m_shuffle_strategy != "runtime" and (m_shuffle_questions or m_shuffle_options):
+        questions = _apply_quiz_shuffle(questions, shuffle_questions=m_shuffle_questions, shuffle_options=m_shuffle_options)
+    quiz_id = await create_quiz(
+        title=title,
+        creator_id=user.id,
+        is_ai_generated=False,
+        open_period=open_period,
+        shuffle_mode=m_shuffle_mode,
+        shuffle_strategy=m_shuffle_strategy,
+    )
     inserted = await create_questions_bulk(quiz_id, questions)
 
     await state.clear()
@@ -3290,6 +3452,8 @@ class AIQuizStates(StatesGroup):
     choose_time = State()
     choose_translate = State()
     choose_lang = State()
+    choose_shuffle = State()
+    choose_shuffle_strategy = State()
 
 
 
@@ -3388,6 +3552,81 @@ def _kb_difficulty(session_id: str, *, ui_lang: str = "uz") -> types.InlineKeybo
     kb.button(text=t(ui_lang, "btn_diff_mixed"), callback_data=f"ai_diff:{session_id}:mixed")
     kb.button(text=t(ui_lang, "btn_cancel"), callback_data=f"ai_cancel:{session_id}")
     kb.adjust(2)
+    return kb.as_markup()
+
+
+_TIME_PRESET_VALUES = (20, 30, 40, 50)
+
+
+def _kb_manual_time_presets(*, ui_lang: str = "uz") -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    for sec in _TIME_PRESET_VALUES:
+        kb.button(text=f"{sec} s", callback_data=f"m_time:{sec}")
+    kb.adjust(2)
+    return kb.as_markup()
+
+
+def _kb_ai_time_presets(session_id: str, *, ui_lang: str = "uz") -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    for sec in _TIME_PRESET_VALUES:
+        kb.button(text=f"{sec} s", callback_data=f"ai_time:{session_id}:{sec}")
+    kb.button(text=t(ui_lang, "btn_cancel"), callback_data=f"ai_cancel:{session_id}")
+    kb.adjust(2, 2, 1)
+    return kb.as_markup()
+
+
+def _kb_quiz_edit_time_presets(quiz_id: int, *, ui_lang: str = "uz") -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    for sec in _TIME_PRESET_VALUES:
+        kb.button(text=f"{sec} s", callback_data=f"quiz_edit_time_set:{int(quiz_id)}:{sec}")
+    kb.button(text=t(ui_lang, "btn_back"), callback_data=f"quiz_edit:{int(quiz_id)}")
+    kb.button(text=t(ui_lang, "btn_cancel"), callback_data=f"quiz_edit_cancel:{int(quiz_id)}")
+    kb.adjust(2, 2, 2)
+    return kb.as_markup()
+
+
+def _kb_manual_shuffle(*, ui_lang: str = "uz") -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(ui_lang, "btn_shuffle_questions"), callback_data="m_shuffle:questions")
+    kb.button(text=t(ui_lang, "btn_shuffle_answers"), callback_data="m_shuffle:options")
+    kb.button(text=t(ui_lang, "btn_shuffle_both"), callback_data="m_shuffle:both")
+    kb.button(text=t(ui_lang, "btn_shuffle_keep"), callback_data="m_shuffle:none")
+    kb.adjust(2, 2)
+    return kb.as_markup()
+
+
+def _kb_ai_shuffle(session_id: str, *, ui_lang: str = "uz") -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(ui_lang, "btn_shuffle_questions"), callback_data=f"ai_shuffle:{session_id}:questions")
+    kb.button(text=t(ui_lang, "btn_shuffle_answers"), callback_data=f"ai_shuffle:{session_id}:options")
+    kb.button(text=t(ui_lang, "btn_shuffle_both"), callback_data=f"ai_shuffle:{session_id}:both")
+    kb.button(text=t(ui_lang, "btn_shuffle_keep"), callback_data=f"ai_shuffle:{session_id}:none")
+    kb.button(text=t(ui_lang, "btn_cancel"), callback_data=f"ai_cancel:{session_id}")
+    kb.adjust(2, 2, 1)
+    return kb.as_markup()
+
+
+def _kb_manual_shuffle_strategy(*, mode: str, ui_lang: str = "uz") -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(ui_lang, "btn_shuffle_saved_once"), callback_data="m_shuffle_strategy:saved")
+    kb.button(text=t(ui_lang, "btn_shuffle_every_run"), callback_data="m_shuffle_strategy:runtime")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def _kb_ai_shuffle_strategy(session_id: str, *, mode: str, ui_lang: str = "uz") -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(ui_lang, "btn_shuffle_saved_once"), callback_data=f"ai_shuffle_strategy:{session_id}:saved")
+    kb.button(text=t(ui_lang, "btn_shuffle_every_run"), callback_data=f"ai_shuffle_strategy:{session_id}:runtime")
+    kb.button(text=t(ui_lang, "btn_cancel"), callback_data=f"ai_cancel:{session_id}")
+    kb.adjust(1)
     return kb.as_markup()
 
 
@@ -3600,6 +3839,8 @@ async def run_resume(call: types.CallbackQuery, bot: Bot) -> None:
         output_language=str(pr.output_language or "source"),
         ui_lang=ui_lang,
         quiz_id=int(pr.quiz_id) if pr.quiz_id is not None else None,
+        shuffle_mode=str(pr.shuffle_mode or "none"),
+        shuffle_strategy=_normalize_shuffle_strategy(pr.shuffle_strategy or "saved"),
         started=ct not in {"group", "supergroup"},
         participants={int(pr.user_id): call.from_user.full_name or str(pr.user_id)},
     )
@@ -3709,11 +3950,12 @@ async def on_poll_answer(poll_answer: types.PollAnswer, bot: Bot) -> None:
         score.correct += 1
     score.total_time += elapsed
 
-    # Early advance when all expected participants answered this question.
+    # In groups we keep the current question open until the configured seconds expire.
+    # Private chats may still auto-advance when all expected participants answered.
     if run.current_poll_id == poll_answer.poll_id and run.current_question_index == ctx.question_index:
         run.answered_users.add(user_id)
         expected = set(getattr(ctx, "expected_users", set()) or set())
-        if expected and len(run.answered_users.intersection(expected)) >= len(expected):
+        if run.chat_type not in {"group", "supergroup"} and expected and len(run.answered_users.intersection(expected)) >= len(expected):
             if run.current_poll_message_id:
                 try:
                     await bot.stop_poll(run.chat_id, run.current_poll_message_id)
@@ -3798,7 +4040,7 @@ async def ai_pages(call: types.CallbackQuery, state: FSMContext) -> None:
         await call.answer(t(ui_lang, "session_owner_only"), show_alert=True)
         return
 
-    has_pages = bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
+    has_pages = bool(data.get("ai_pages_required")) or bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
     if not has_pages:
         await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
         return
@@ -3853,7 +4095,7 @@ async def ai_pageset(call: types.CallbackQuery, state: FSMContext) -> None:
         await call.answer(t(ui_lang, "session_owner_only"), show_alert=True)
         return
 
-    has_pages = bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
+    has_pages = bool(data.get("ai_pages_required")) or bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
     if not has_pages:
         await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
         return
@@ -3887,7 +4129,7 @@ async def ai_pageset(call: types.CallbackQuery, state: FSMContext) -> None:
         await call.message.answer(t(ui_lang, "pages_set", p_from=int(p_from), p_to=int(p_to)))
 
     data = await state.get_data()
-    show_pages = bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
+    show_pages = bool(data.get("ai_pages_required")) or bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
     return_to = str(data.get("ai_pages_return") or "count").strip().lower()
     if return_to == "translate":
         await state.set_state(AIQuizStates.choose_translate)
@@ -4022,6 +4264,123 @@ def _uniq_ints(ints: List[int]) -> List[int]:
     return out
 
 
+def _question_identity(q: Dict[str, Any]) -> str:
+    return re.sub(r"\s+", " ", str(q.get("question") or "")).strip().lower()
+
+
+def _merge_unique_questions(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for q in list(items or []):
+        if not isinstance(q, dict):
+            continue
+        key = _question_identity(q)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(q)
+    return out
+
+
+def _shuffle_question_options_local(question: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(question or {})
+    options = list(payload.get("options") or [])
+    try:
+        correct_index = int(payload.get("correct_index"))
+    except Exception:
+        return payload
+    if len(options) != 4 or correct_index < 0 or correct_index >= len(options):
+        return payload
+    order = list(range(len(options)))
+    random.shuffle(order)
+    payload["options"] = [options[i] for i in order]
+    payload["correct_index"] = int(order.index(correct_index))
+    return payload
+
+
+def _apply_quiz_shuffle(items: List[Dict[str, Any]], *, shuffle_questions: bool, shuffle_options: bool) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for q in list(items or []):
+        payload = dict(q or {})
+        if shuffle_options:
+            payload = _shuffle_question_options_local(payload)
+        out.append(payload)
+    if shuffle_questions and len(out) > 1:
+        random.shuffle(out)
+    return out
+
+
+def _should_offer_ai_shuffle(data: Dict[str, Any]) -> bool:
+    mode = str(data.get("ai_mode") or "").strip().lower()
+    return mode in {"file", "image"}
+
+
+def _shuffle_mode_flags(mode: str) -> tuple[bool, bool]:
+    m = str(mode or "none").strip().lower()
+    if m == "questions":
+        return True, False
+    if m == "options":
+        return False, True
+    if m == "both":
+        return True, True
+    return False, False
+
+
+def _normalize_shuffle_strategy(strategy: Any) -> str:
+    s = str(strategy or "saved").strip().lower()
+    if s == "runtime":
+        return "runtime"
+    return "saved"
+
+
+async def _fill_questions_from_text(
+    *,
+    existing: List[Dict[str, Any]],
+    source_text: str,
+    question_count: int,
+    output_language: str,
+    difficulty: str,
+    focus_topic: str,
+    allow_generate: bool,
+    shuffle_options: bool,
+) -> tuple[List[Dict[str, Any]], bool]:
+    target = max(1, int(question_count or 0))
+    questions = _merge_unique_questions(existing)
+    source = str(source_text or "").strip()
+    if len(questions) >= target or not allow_generate or len(source) < 200:
+        return questions[:target], False
+
+    used_ai = False
+    stagnant = 0
+    for _ in range(3):
+        if len(questions) >= target:
+            break
+        remaining = target - len(questions)
+        request_n = min(50, max(remaining, remaining + min(5, max(1, remaining // 2))))
+        try:
+            extra = await ai_service.generate_quiz_from_text(
+                source,
+                question_count=request_n,
+                output_language=output_language,
+                difficulty=difficulty,
+                focus_topic=focus_topic,
+                shuffle_options=shuffle_options,
+            )
+        except Exception:
+            break
+        used_ai = True
+        before = len(questions)
+        questions = _merge_unique_questions(questions + list(extra or []))
+        if len(questions) == before:
+            stagnant += 1
+            if stagnant >= 1:
+                break
+        else:
+            stagnant = 0
+
+    return questions[:target], used_ai
+
+
 def _parse_topic_count_time(raw_text: str, *, max_count: int = 50) -> tuple[str, List[int], List[int]]:
     """Parse one message that may contain topic + count/time hints."""
     raw = (raw_text or "").strip()
@@ -4090,7 +4449,7 @@ async def ai_choose_pages_text(message: types.Message, state: FSMContext) -> Non
         await message.answer(t(ui_lang, "session_owner_only"))
         return
 
-    has_pages = bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
+    has_pages = bool(data.get("ai_pages_required")) or bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
     if not has_pages:
         await state.clear()
         await message.answer(t(ui_lang, "session_missing"))
@@ -4144,7 +4503,7 @@ async def ai_choose_pages_text(message: types.Message, state: FSMContext) -> Non
 
     data = await state.get_data()
     session_id = str(data.get("ai_session_id"))
-    show_pages = bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
+    show_pages = bool(data.get("ai_pages_required")) or bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
     return_to = str(data.get("ai_pages_return") or "count").strip().lower()
     if return_to == "translate":
         await state.set_state(AIQuizStates.choose_translate)
@@ -4191,7 +4550,7 @@ async def _continue_after_topic_settings(
         return
 
     return_to = str(data.get("ai_topic_return") or "count").strip().lower()
-    show_pages = bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
+    show_pages = bool(data.get("ai_pages_required")) or bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
 
     # If user clicked "topic optional" during count/pages stage, we jump back to translation.
     if return_to == "translate":
@@ -4217,7 +4576,7 @@ async def _continue_after_topic_settings(
 
     if data.get("ai_question_count"):
         await state.set_state(AIQuizStates.choose_time)
-        await message.answer(t(ui_lang, "choose_time"))
+        await message.answer(t(ui_lang, "choose_time"), reply_markup=_kb_ai_time_presets(session_id, ui_lang=ui_lang))
         return
 
     await state.set_state(AIQuizStates.choose_count)
@@ -4265,39 +4624,7 @@ async def ai_choose_topic_text(message: types.Message, state: FSMContext) -> Non
 
     mode = str(data.get("ai_mode") or "").strip().lower()
     if mode == "topic" and topic:
-        await state.update_data(ai_title=topic[:120])
-
-        # Best-effort: try to find a reliable source text for the topic (e.g., book/article)
-        # and use it as context so questions become more meaningful.
-        try:
-            status = await message.answer(t(ui_lang, "topic_searching"))
-        except Exception:
-            status = None
-
-        try:
-            ctx = await fetch_topic_context(topic, ui_lang=ui_lang)
-        except Exception:
-            ctx = None
-
-        if ctx and str(getattr(ctx, "text", "") or "").strip():
-            await state.update_data(ai_text=str(ctx.text), ai_title=str(ctx.title or topic)[:120])
-            if status:
-                try:
-                    await status.edit_text(t(ui_lang, "topic_source_found", title=str(ctx.title or topic)[:120]))
-                except Exception:
-                    pass
-        else:
-            if status:
-                try:
-                    await status.edit_text(
-                        t(ui_lang, "topic_source_not_found"),
-                        reply_markup=_kb_topic_no_source(str(data.get("ai_session_id") or ""), ui_lang=ui_lang),
-                    )
-                except Exception:
-                    pass
-            # Don't proceed to difficulty/count/time without a source (prevents shallow nonsense quizzes).
-            # User can explicitly continue via the "continue anyway" button.
-            return
+        await state.update_data(ai_title=topic[:120], ai_text="")
 
     data = await state.get_data()
     session_id = str(data.get("ai_session_id") or "")
@@ -4401,7 +4728,7 @@ async def ai_choose_count_text(message: types.Message, state: FSMContext) -> Non
     text = message.text or ""
 
     # Allow typing a page range in this step (PDF only), e.g. "20-30".
-    has_pages = bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
+    has_pages = bool(data.get("ai_pages_required")) or bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
     if has_pages:
         pr = _parse_page_range(text)
         looks_like_pages = bool(re.search(r"\d+\s*(?:-|\\.\\.)\s*\d+", text)) or bool(
@@ -4460,7 +4787,7 @@ async def ai_choose_count_text(message: types.Message, state: FSMContext) -> Non
     await state.update_data(ai_question_count=int(n))
 
     await state.set_state(AIQuizStates.choose_time)
-    await message.answer(t(ui_lang, "choose_time"))
+    await message.answer(t(ui_lang, "choose_time"), reply_markup=_kb_ai_time_presets(session_id, ui_lang=ui_lang))
 
 
 @router.message(AIQuizStates.choose_time)
@@ -4479,7 +4806,7 @@ async def ai_choose_time_text(message: types.Message, state: FSMContext) -> None
 
     sec = _first_int(message.text or "")
     if sec is None or sec < 5 or sec > 600:
-        await message.answer(t(ui_lang, "time_invalid"))
+        await message.answer(t(ui_lang, "time_invalid"), reply_markup=_kb_ai_time_presets(str(data.get("ai_session_id") or ""), ui_lang=ui_lang))
         return
 
     session_id = str(data.get("ai_session_id"))
@@ -4487,7 +4814,7 @@ async def ai_choose_time_text(message: types.Message, state: FSMContext) -> None
     await state.set_state(AIQuizStates.choose_translate)
     settings = await get_or_create_user_settings(user_id=message.from_user.id if message.from_user else 0)
     default_lang = str(settings.get("default_lang") or "source")
-    show_pages = bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
+    show_pages = bool(data.get("ai_pages_required")) or bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
     await message.answer(
         t(ui_lang, "need_translation"),
         reply_markup=_kb_translate(session_id, default_lang=default_lang, ui_lang=ui_lang, show_pages=show_pages),
@@ -4529,10 +4856,11 @@ async def ai_choose_count(call: types.CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AIQuizStates.choose_time)
     if call.message:
         prompt = t(ui_lang, "count_chosen", n=n) + "\n" + t(ui_lang, "choose_time")
+        markup = _kb_ai_time_presets(session_id, ui_lang=ui_lang)
         try:
-            await call.message.edit_text(prompt)
+            await call.message.edit_text(prompt, reply_markup=markup)
         except Exception:
-            await call.message.answer(prompt)
+            await call.message.answer(prompt, reply_markup=markup)
 
 
 @router.callback_query(F.data.startswith("ai_time:"))
@@ -4559,7 +4887,7 @@ async def ai_choose_time(call: types.CallbackQuery, state: FSMContext) -> None:
     except Exception:
         await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
         return
-    if sec not in {15, 30, 60, 120}:
+    if sec not in _TIME_PRESET_VALUES:
         await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
         return
 
@@ -4569,7 +4897,7 @@ async def ai_choose_time(call: types.CallbackQuery, state: FSMContext) -> None:
     if call.message:
         settings = await get_or_create_user_settings(user_id=call.from_user.id)
         default_lang = str(settings.get("default_lang") or "source")
-        show_pages = bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
+        show_pages = bool(data.get("ai_pages_required")) or bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
         await call.message.answer(
             t(ui_lang, "need_translation"),
             reply_markup=_kb_translate(session_id, default_lang=default_lang, ui_lang=ui_lang, show_pages=show_pages),
@@ -4632,6 +4960,10 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
     mode = str(data.get('ai_mode') or '').strip().lower()
     quota_kind = 'topic' if mode == 'topic' else 'file'
     reservation: Optional[dict] = None
+    should_offer_shuffle = mode in {"file", "image"}
+    shuffle_mode = str(data.get("ai_shuffle_mode") or "none").strip().lower() if should_offer_shuffle else "none"
+    shuffle_strategy = _normalize_shuffle_strategy(data.get("ai_shuffle_strategy") or "saved") if should_offer_shuffle else "saved"
+    generation_shuffle_options = not should_offer_shuffle
 
     # Apply optional page-range selection for scanned PDFs (images) ONLY when images come from state.
     if orig_image_paths and page_from >= 1 and page_to >= page_from:
@@ -4647,8 +4979,8 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
         await bot.send_message(chat_id, t(ui_lang, "no_input_for_ai"))
         return
 
-    # PDF/PPTX fayllar uchun sahifa oralig'i majburiy.
-    if (pdf_path or pptx_path) and not (page_from >= 1 and page_to >= page_from):
+    # Upload qilingan barcha fayllar uchun sahifa oralig'i majburiy.
+    if bool(data.get("ai_pages_required")) and not (page_from >= 1 and page_to >= page_from):
         await state.clear()
         await bot.send_message(chat_id, t(ui_lang, "pages_required"))
         return
@@ -4674,12 +5006,14 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
     )
     quiz_id: Optional[int] = None
     imported_ready = False
+    used_ai_generation = False
     try:
         use_paths: List[str] = []
         if image_paths:
             # One question per image (e.g., scanned PDF pages).
             use_paths = [str(p) for p in image_paths[:question_count] if str(p).strip()]
-            questions = await ai_service.generate_quiz_from_images(use_paths, output_language=output_language)
+            used_ai_generation = True
+            questions = await ai_service.generate_quiz_from_images(use_paths, output_language=output_language, shuffle_options=generation_shuffle_options)
             for q, p in zip(questions, use_paths):
                 q["image_path"] = p
         elif pdf_path or pptx_path:
@@ -4707,7 +5041,7 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                     imported_ready = True
                     if parsed_title:
                         title = parsed_title.strip()[:120]
-                    questions = ready_questions[: int(question_count or len(ready_questions))]
+                    questions = ready_questions
                 elif len(use_text.strip()) < 200:
                     try:
                         provider = ai_service._pick_provider()
@@ -4728,17 +5062,33 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                         raise AIServiceError(t(ui_lang, "scan_pdf_no_images"))
 
                     use_paths = [str(p) for p in image_paths[:question_count] if str(p).strip()]
-                    questions = await ai_service.generate_quiz_from_images(use_paths, output_language=output_language)
+                    used_ai_generation = True
+                    questions = await ai_service.generate_quiz_from_images(use_paths, output_language=output_language, shuffle_options=generation_shuffle_options)
                     for q, p in zip(questions, use_paths):
                         q["image_path"] = p
                 else:
+                    used_ai_generation = True
                     questions = await ai_service.generate_quiz_from_text(
                         use_text,
                         question_count=question_count,
                         output_language=output_language,
                         difficulty=difficulty,
                         focus_topic=topic,
+                        shuffle_options=generation_shuffle_options,
                     )
+
+                if use_text.strip():
+                    questions, topped_up = await _fill_questions_from_text(
+                        existing=questions,
+                        source_text=use_text,
+                        question_count=question_count,
+                        output_language=output_language,
+                        difficulty=difficulty,
+                        focus_topic=topic,
+                        allow_generate=AI_ENABLED,
+                        shuffle_options=generation_shuffle_options,
+                    )
+                    used_ai_generation = used_ai_generation or topped_up
             else:
                 try:
                     use_text = await asyncio.to_thread(
@@ -4761,7 +5111,7 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                     imported_ready = True
                     if parsed_title:
                         title = parsed_title.strip()[:120]
-                    questions = ready_questions[: int(question_count or len(ready_questions))]
+                    questions = ready_questions
                 elif len(use_text.strip()) < 200:
                     try:
                         provider = ai_service._pick_provider()
@@ -4786,17 +5136,33 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                         raise AIServiceError(t(ui_lang, "scan_pdf_no_images"))
 
                     use_paths = [str(p) for p in image_paths[:question_count] if str(p).strip()]
-                    questions = await ai_service.generate_quiz_from_images(use_paths, output_language=output_language)
+                    used_ai_generation = True
+                    questions = await ai_service.generate_quiz_from_images(use_paths, output_language=output_language, shuffle_options=generation_shuffle_options)
                     for q, p in zip(questions, use_paths):
                         q["image_path"] = p
                 else:
+                    used_ai_generation = True
                     questions = await ai_service.generate_quiz_from_text(
                         use_text,
                         question_count=question_count,
                         output_language=output_language,
                         difficulty=difficulty,
                         focus_topic=topic,
+                        shuffle_options=generation_shuffle_options,
                     )
+
+                if use_text.strip():
+                    questions, topped_up = await _fill_questions_from_text(
+                        existing=questions,
+                        source_text=use_text,
+                        question_count=question_count,
+                        output_language=output_language,
+                        difficulty=difficulty,
+                        focus_topic=topic,
+                        allow_generate=AI_ENABLED,
+                        shuffle_options=generation_shuffle_options,
+                    )
+                    used_ai_generation = used_ai_generation or topped_up
         elif text:
             try:
                 parsed_title, ready_questions = parse_quiz_payload(text, title_fallback=title)
@@ -4806,22 +5172,62 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                 imported_ready = True
                 if parsed_title:
                     title = parsed_title.strip()[:120]
-                questions = ready_questions[: int(question_count or len(ready_questions))]
+                questions = ready_questions
             else:
+                if bool(data.get("ai_import_only")) or (not AI_ENABLED):
+                    raise AIServiceError(t(ui_lang, "import_failed"))
+                used_ai_generation = True
                 questions = await ai_service.generate_quiz_from_text(
                     text,
                     question_count=question_count,
                     output_language=output_language,
                     difficulty=difficulty,
                     focus_topic=topic,
+                    shuffle_options=generation_shuffle_options,
                 )
-        else:
-            questions = await ai_service.generate_quiz_from_topic(
-                topic,
+
+            questions, topped_up = await _fill_questions_from_text(
+                existing=questions,
+                source_text=text,
                 question_count=question_count,
                 output_language=output_language,
                 difficulty=difficulty,
+                focus_topic=topic,
+                allow_generate=AI_ENABLED and not bool(data.get("ai_import_only")),
+                shuffle_options=generation_shuffle_options,
             )
+            used_ai_generation = used_ai_generation or topped_up
+        else:
+            ctx = None
+            if topic:
+                try:
+                    ctx = await fetch_topic_context(topic, ui_lang=ui_lang)
+                except Exception:
+                    ctx = None
+
+            ctx_text = str(getattr(ctx, "text", "") or "").strip() if ctx else ""
+            if ctx_text:
+                ctx_title = str(getattr(ctx, "title", "") or "").strip()
+                if ctx_title:
+                    title = ctx_title[:120]
+                used_ai_generation = True
+                questions = await ai_service.generate_quiz_from_text(
+                    ctx_text,
+                    question_count=question_count,
+                    output_language=output_language,
+                    difficulty=difficulty,
+                    focus_topic=topic,
+                    shuffle_options=generation_shuffle_options,
+                )
+            else:
+                used_ai_generation = True
+                questions = await ai_service.generate_quiz_from_topic(
+                    topic,
+                    question_count=question_count,
+                    output_language=output_language,
+                    difficulty=difficulty,
+                    shuffle_options=generation_shuffle_options,
+                )
 
         if not questions:
             raise AIServiceError("Savollar chiqmadi. Iltimos, sahifa oralig'ini o'zgartirib qayta urinib ko'ring.")
@@ -4829,7 +5235,14 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
         reservation = await reserve_user_quota(user.id, quota_kind)
 
         await get_or_create_user(user_id=user.id, full_name=user.full_name, username=getattr(user, "username", None))
-        quiz_id = await create_quiz(title=title, creator_id=user.id, is_ai_generated=(not imported_ready), open_period=open_period)
+        quiz_id = await create_quiz(
+            title=title,
+            creator_id=user.id,
+            is_ai_generated=used_ai_generation,
+            open_period=open_period,
+            shuffle_mode=shuffle_mode,
+            shuffle_strategy=shuffle_strategy,
+        )
 
         # Persist images under media/quizzes/<quiz_id>/ so the quiz can be re-run any time.
         moved_sources: set[str] = set()
@@ -4866,6 +5279,11 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                 except Exception:
                     pass
 
+        if should_offer_shuffle and shuffle_strategy != "runtime":
+            shuffle_questions, shuffle_options = _shuffle_mode_flags(shuffle_mode)
+            if shuffle_questions or shuffle_options:
+                questions = _apply_quiz_shuffle(questions, shuffle_questions=shuffle_questions, shuffle_options=shuffle_options)
+
         await create_questions_bulk(quiz_id, questions)
 
         username = await _get_bot_username(bot)
@@ -4888,7 +5306,7 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
             id=int(quiz_id or 0),
         )
         if len(questions) < int(question_count or 0):
-            if imported_ready:
+            if imported_ready and not used_ai_generation:
                 text_out = text_out + "\n\n" + t(ui_lang, "import_partial", wanted=int(question_count), found=int(len(questions)))
             else:
                 text_out = text_out + "\n\n" + t(ui_lang, "ai_partial", wanted=int(question_count), made=int(len(questions)))
@@ -4994,6 +5412,22 @@ async def ai_choose_difficulty(call: types.CallbackQuery, state: FSMContext) -> 
         await _continue_after_topic_settings(call.message, state, ui_lang=ui_lang, user_id=call.from_user.id, max_n=max_n)
 
 
+async def _start_ai_quiz_after_language(bot: Bot, state: FSMContext, *, chat_id: int, user: types.User, output_language: str) -> None:
+    data = await state.get_data()
+    ui_lang = norm_ui_lang(str(data.get("ai_ui_lang") or ""))
+    if not data.get("ai_ui_lang"):
+        ui_lang = await _get_ui_lang(int(getattr(user, "id", 0) or 0))
+
+    if _should_offer_ai_shuffle(data):
+        session_id = str(data.get("ai_session_id") or "")
+        await state.update_data(ai_output_language=output_language)
+        await state.set_state(AIQuizStates.choose_shuffle)
+        await bot.send_message(chat_id, t(ui_lang, "shuffle_prompt_ai"), reply_markup=_kb_ai_shuffle(session_id, ui_lang=ui_lang))
+        return
+
+    await _start_ai_quiz(bot, state, chat_id=chat_id, user=user, output_language=output_language)
+
+
 @router.callback_query(F.data.startswith("ai_translate:"))
 async def ai_translate(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
     parts = call.data.split(":")
@@ -5025,7 +5459,7 @@ async def ai_translate(call: types.CallbackQuery, state: FSMContext, bot: Bot) -
         settings = await get_or_create_user_settings(user_id=call.from_user.id)
         default_lang = str(settings.get("default_lang") or "source").strip().lower()
         if default_lang in {"uz", "ru", "en", "de", "tr", "kk", "ar", "zh", "ko"}:
-            await _start_ai_quiz(
+            await _start_ai_quiz_after_language(
                 bot,
                 state,
                 chat_id=call.message.chat.id if call.message else int(data.get("ai_chat_id") or 0),
@@ -5033,7 +5467,6 @@ async def ai_translate(call: types.CallbackQuery, state: FSMContext, bot: Bot) -
                 output_language=default_lang,
             )
             return
-        # If default is "source", ask for language explicitly.
         await state.set_state(AIQuizStates.choose_lang)
         if call.message:
             await call.message.answer(t(ui_lang, "choose_translation_lang"), reply_markup=_kb_langs(session_id, ui_lang=ui_lang))
@@ -5041,7 +5474,13 @@ async def ai_translate(call: types.CallbackQuery, state: FSMContext, bot: Bot) -
 
     if action == "source":
         await call.answer()
-        await _start_ai_quiz(bot, state, chat_id=call.message.chat.id if call.message else 0, user=call.from_user, output_language="source")
+        await _start_ai_quiz_after_language(
+            bot,
+            state,
+            chat_id=call.message.chat.id if call.message else 0,
+            user=call.from_user,
+            output_language="source",
+        )
         return
 
     await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
@@ -5071,13 +5510,94 @@ async def ai_choose_lang(call: types.CallbackQuery, state: FSMContext, bot: Bot)
         return
     await call.answer()
 
-    await _start_ai_quiz(
+    await _start_ai_quiz_after_language(
         bot,
         state,
         chat_id=int(data.get("ai_chat_id") or call.message.chat.id if call.message else 0),
         user=call.from_user,
         output_language=lang,
     )
+
+
+@router.callback_query(F.data.startswith("ai_shuffle:"))
+async def ai_choose_shuffle(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    parts = call.data.split(":")
+    if len(parts) != 3:
+        ui_lang = await _get_ui_lang(call.from_user.id)
+        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        return
+    session_id, choice = parts[1], parts[2]
+    data = await state.get_data()
+    ui_lang = norm_ui_lang(str(data.get("ai_ui_lang") or ""))
+    if not data.get("ai_ui_lang"):
+        ui_lang = await _get_ui_lang(call.from_user.id)
+    if data.get("ai_session_id") != session_id:
+        await call.answer(t(ui_lang, "session_missing"), show_alert=True)
+        return
+    if data.get("ai_user_id") != call.from_user.id:
+        await call.answer(t(ui_lang, "session_owner_only"), show_alert=True)
+        return
+    if choice not in {"questions", "options", "both", "none"}:
+        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        return
+
+    await call.answer()
+    output_language = str(data.get("ai_output_language") or "source").strip().lower() or "source"
+    if output_language not in {"source", "uz", "ru", "en", "de", "tr", "kk", "ar", "zh", "ko"}:
+        output_language = "source"
+
+    if choice == "none":
+        await state.update_data(ai_shuffle_mode="none", ai_shuffle_strategy="saved")
+        await _start_ai_quiz(
+            bot,
+            state,
+            chat_id=int(data.get("ai_chat_id") or call.message.chat.id if call.message else 0),
+            user=call.from_user,
+            output_language=output_language,
+        )
+        return
+
+    await state.update_data(ai_shuffle_mode=choice, ai_output_language=output_language)
+    await state.set_state(AIQuizStates.choose_shuffle_strategy)
+    if call.message:
+        await call.message.answer(
+            t(ui_lang, "shuffle_strategy_prompt"),
+            reply_markup=_kb_ai_shuffle_strategy(session_id, mode=choice, ui_lang=ui_lang),
+        )
+
+
+@router.callback_query(F.data.startswith("ai_shuffle_strategy:"))
+async def ai_choose_shuffle_strategy(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    parts = call.data.split(":")
+    if len(parts) != 3:
+        ui_lang = await _get_ui_lang(call.from_user.id)
+        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        return
+    session_id, strategy = parts[1], parts[2]
+    data = await state.get_data()
+    ui_lang = norm_ui_lang(str(data.get("ai_ui_lang") or ""))
+    if not data.get("ai_ui_lang"):
+        ui_lang = await _get_ui_lang(call.from_user.id)
+    if data.get("ai_session_id") != session_id:
+        await call.answer(t(ui_lang, "session_missing"), show_alert=True)
+        return
+    if data.get("ai_user_id") != call.from_user.id:
+        await call.answer(t(ui_lang, "session_owner_only"), show_alert=True)
+        return
+
+    await call.answer()
+    output_language = str(data.get("ai_output_language") or "source").strip().lower() or "source"
+    if output_language not in {"source", "uz", "ru", "en", "de", "tr", "kk", "ar", "zh", "ko"}:
+        output_language = "source"
+    await state.update_data(ai_shuffle_strategy=_normalize_shuffle_strategy(strategy))
+    await _start_ai_quiz(
+        bot,
+        state,
+        chat_id=int(data.get("ai_chat_id") or call.message.chat.id if call.message else 0),
+        user=call.from_user,
+        output_language=output_language,
+    )
+
 
 @router.message(F.photo)
 async def on_photo_upload(message: types.Message, bot: Bot, state: FSMContext) -> None:
@@ -5142,7 +5662,7 @@ async def on_photo_upload(message: types.Message, bot: Bot, state: FSMContext) -
             ai_question_count=1,
         )
         await state.set_state(AIQuizStates.choose_time)
-        await status.edit_text(t(ui_lang, "choose_time"))
+        await status.edit_text(t(ui_lang, "choose_time"), reply_markup=_kb_ai_time_presets(session_id, ui_lang=ui_lang))
     except Exception as exc:
         await status.edit_text(t(ui_lang, "err_unexpected", err=str(exc)))
         if local_path is not None:
@@ -5223,27 +5743,22 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
             )
             cleanup_local = False
             await state.set_state(AIQuizStates.choose_time)
-            await status.edit_text(t(ui_lang, "choose_time"))
+            await status.edit_text(t(ui_lang, "choose_time"), reply_markup=_kb_ai_time_presets(session_id, ui_lang=ui_lang))
             return
 
         # Import mode: JSON is always treated as a ready quiz file.
         # In NO-AI mode we import from prepared files instead of generating via AI.
         if (not AI_ENABLED) or suffix == ".json":
-            await status.edit_text(t(ui_lang, "importing_quiz"))
             title = Path(file_name).stem
             open_period = 30
-            page_from = 0
-            page_to = 0
 
             if caption:
-                # title: ...
                 for line in caption.splitlines():
                     m = re.match(r"(?is)^\s*(?:title|nom)\s*:\s*(.+)$", line.strip())
                     if m and (m.group(1) or "").strip():
                         title = (m.group(1) or "").strip()[:120]
                         break
 
-                # time: 30 or "30s"
                 m = re.search(r"(?i)\b(?:time|sec|sek|sekund|soniya)\s*[:\-]\s*(\d{1,3})\b", caption)
                 if m and m.group(1).isdigit():
                     open_period = int(m.group(1))
@@ -5253,73 +5768,30 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
                         open_period = int(m.group(1))
                 open_period = max(5, min(600, int(open_period or 30)))
 
-                # pages: 20-30
-                m = re.search(
-                    r"(?i)\b(?:pages?|sahifa|bet)\s*[:\-]\s*(\d{1,4})(?:\s*(?:-|\\.\\.)\s*(\d{1,4}))?",
-                    caption,
-                )
-                if m and m.group(1).isdigit():
-                    page_from = int(m.group(1))
-                    page_to = int(m.group(2)) if (m.group(2) or "").isdigit() else page_from
+            await status.edit_text(t(ui_lang, "extracting_text"))
+            raw = local_path.read_text(encoding="utf-8", errors="ignore") if suffix == ".json" else await asyncio.to_thread(extract_text_from_file, str(local_path))
 
-            raw = ""
-            if suffix == ".json":
-                raw = local_path.read_text(encoding="utf-8", errors="ignore")
-            elif suffix == ".pdf" and page_from >= 1 and page_to >= page_from:
-                raw = await asyncio.to_thread(
-                    _extract_pdf_text_range,
-                    local_path,
-                    page_from,
-                    page_to,
-                    char_limit=int(os.getenv("EXTRACT_CHAR_LIMIT", "200000")),
-                )
-            else:
-                raw = await asyncio.to_thread(extract_text_from_file, str(local_path))
-
-            parsed_title, questions = parse_quiz_payload(raw, title_fallback=title)
-            if parsed_title:
-                title = parsed_title
-
-            if not questions:
-                await status.edit_text(t(ui_lang, "import_failed"))
-                await message.answer(import_format_example())
-                return
-
-            user = message.from_user
-            if not user:
-                await status.edit_text(t(ui_lang, "error_short"))
-                return
-            await get_or_create_user(user_id=user.id, full_name=user.full_name, username=getattr(user, "username", None))
-
-            reservation = None
-            try:
-                reservation = await reserve_user_quota(user.id, 'file')
-            except QuotaExceeded as exc:
-                await status.edit_text(_quota_exceeded_text(ui_lang, exc), reply_markup=_kb_premium_plans(ui_lang))
-                return
-
-            quiz_id = await create_quiz(title=title, creator_id=user.id, is_ai_generated=False, open_period=open_period)
-            inserted = await create_questions_bulk(quiz_id, questions)
-            if inserted <= 0:
-                if reservation:
-                    await refund_user_quota(reservation)
-                await status.edit_text(t(ui_lang, "import_failed"))
-                await message.answer(import_format_example())
-                return
-
-            username = await _get_bot_username(bot)
+            session_id = uuid.uuid4().hex
+            await state.update_data(
+                ai_session_id=session_id,
+                ai_mode="file",
+                ai_difficulty="",
+                ai_ui_lang=ui_lang,
+                ai_text=raw[:120000],
+                ai_title=title,
+                ai_open_period=open_period,
+                ai_chat_id=message.chat.id,
+                ai_chat_type=message.chat.type,
+                ai_user_id=message.from_user.id if message.from_user else 0,
+                ai_pages_total=1,
+                ai_pages_return="count",
+                ai_pages_required=True,
+                ai_import_only=True,
+            )
+            await state.set_state(AIQuizStates.choose_pages)
             await status.edit_text(
-                t(ui_lang, "import_ok", title=title, n=inserted, id=int(quiz_id)),
-                reply_markup=_kb_quiz_share(
-                    username,
-                    quiz_id,
-                    title=title,
-                    question_count=inserted,
-                    chat_type=message.chat.type,
-                    ui_lang=ui_lang,
-                    show_stats=True,
-                    show_edit=True,
-                ),
+                t(ui_lang, "pages_prompt", total=1),
+                reply_markup=_kb_page_presets(session_id, 1, ui_lang=ui_lang),
             )
             return
 
@@ -5356,6 +5828,7 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
                 ai_topic=topic,
                 ai_pages_total=int(pages_total or 0),
                 ai_pages_return="count",
+                ai_pages_required=True,
             )
             if suffix == ".pdf":
                 data_out["ai_pdf_path"] = str(local_path)
@@ -5374,175 +5847,8 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
         await status.edit_text(t(ui_lang, "extracting_text"))
         text = await asyncio.to_thread(extract_text_from_file, str(local_path))
 
-        # If the uploaded file already contains a ready quiz (questions + answers),
-        # import it as-is (preserves the file order).
-        parsed_title = ""
-        ready_questions: List[Dict[str, Any]] = []
-        try:
-            parsed_title, ready_questions = parse_quiz_payload(text, title_fallback=Path(file_name).stem)
-        except Exception:
-            parsed_title, ready_questions = ("", [])
-
-        if ready_questions:
-            title2 = (parsed_title or Path(file_name).stem).strip()[:120]
-            open_period2 = 30
-            if caption:
-                m = re.search(r"(?i)\b(?:time|sec|sek|sekund|soniya)\s*[:\-]\s*(\d{1,3})\b", caption)
-                if m and m.group(1).isdigit():
-                    open_period2 = int(m.group(1))
-                else:
-                    m = _TIME_HINT_RE.search(caption)
-                    if m and m.group(1).isdigit():
-                        open_period2 = int(m.group(1))
-                open_period2 = max(5, min(600, int(open_period2 or 30)))
-
-            await status.edit_text(t(ui_lang, "importing_quiz"))
-
-            user = message.from_user
-            if not user:
-                await status.edit_text(t(ui_lang, "error_short"))
-                return
-            await get_or_create_user(
-                user_id=user.id,
-                full_name=user.full_name,
-                username=getattr(user, "username", None),
-            )
-
-            reservation = None
-            try:
-                reservation = await reserve_user_quota(user.id, 'file')
-            except QuotaExceeded as exc:
-                await status.edit_text(_quota_exceeded_text(ui_lang, exc), reply_markup=_kb_premium_plans(ui_lang))
-                return
-
-            quiz_id = await create_quiz(title=title2, creator_id=user.id, is_ai_generated=False, open_period=open_period2)
-            inserted = await create_questions_bulk(quiz_id, ready_questions)
-            if inserted <= 0:
-                if reservation:
-                    await refund_user_quota(reservation)
-                await status.edit_text(t(ui_lang, "import_failed"))
-                await message.answer(import_format_example())
-                return
-
-            username = await _get_bot_username(bot)
-            await status.edit_text(
-                t(ui_lang, "import_ok", title=title2, n=inserted, id=int(quiz_id)),
-                reply_markup=_kb_quiz_share(
-                    username,
-                    quiz_id,
-                    title=title2,
-                    question_count=inserted,
-                    chat_type=message.chat.type,
-                    ui_lang=ui_lang,
-                    show_stats=True,
-                    show_edit=True,
-                ),
-            )
-            return
-
-        if len(text.strip()) < 200:
-            if suffix == ".pdf":
-                # Likely a scanned PDF (no extractable text). Render pages to images and use Gemini vision.
-                try:
-                    provider = ai_service._pick_provider()
-                except AIServiceError as exc:
-                    await status.edit_text(t(ui_lang, "err_ai", err=str(exc)))
-                    return
-
-                if provider != "gemini":
-                    await status.edit_text(t(ui_lang, "scan_pdf_need_gemini"))
-                    return
-
-                session_id = uuid.uuid4().hex
-                out_dir = _DOWNLOAD_DIR / f"scan_{session_id}"
-                max_pages = int(os.getenv("PDF_SCAN_MAX_PAGES", "30") or 30)
-                zoom = float(os.getenv("PDF_SCAN_ZOOM", "2.0") or 2.0)
-
-                await status.edit_text(t(ui_lang, "scan_pdf_rendering"))
-                image_paths = await asyncio.to_thread(
-                    _render_pdf_pages_to_images,
-                    local_path,
-                    out_dir,
-                    max_pages=max_pages,
-                    zoom=zoom,
-                )
-                if not image_paths:
-                    await status.edit_text(t(ui_lang, "scan_pdf_no_images"))
-                    return
-
-                await state.update_data(
-                    ai_session_id=session_id,
-                    ai_mode="scanpdf",
-                    ai_difficulty="",
-                    ai_ui_lang=ui_lang,
-                    ai_image_paths=image_paths,
-                    ai_max_questions=len(image_paths),
-                    ai_pages_total=len(image_paths),
-                    ai_title=Path(file_name).stem,
-                    ai_chat_id=message.chat.id,
-                    ai_chat_type=message.chat.type,
-                    ai_user_id=message.from_user.id if message.from_user else 0,
-                )
-                await state.set_state(AIQuizStates.choose_count)
-                await status.edit_text(
-                    t(ui_lang, "scan_pdf_choose_count", pages=len(image_paths), max_n=min(50, len(image_paths))),
-                    reply_markup=_kb_counts(session_id, max_n=len(image_paths), ui_lang=ui_lang, show_pages=True),
-                )
-                return
-
-            if suffix == ".pptx":
-                # PPTX can be mostly images (no extractable text). Extract embedded images and use Gemini vision.
-                try:
-                    provider = ai_service._pick_provider()
-                except AIServiceError as exc:
-                    await status.edit_text(t(ui_lang, "err_ai", err=str(exc)))
-                    return
-
-                if provider != "gemini":
-                    await status.edit_text(t(ui_lang, "scan_pdf_need_gemini"))
-                    return
-
-                session_id = uuid.uuid4().hex
-                out_dir = _DOWNLOAD_DIR / f"scan_{session_id}"
-                max_images = int(os.getenv("PPTX_SCAN_MAX_IMAGES", "30") or 30)
-
-                await status.edit_text(t(ui_lang, "scan_pdf_rendering"))
-                image_paths = await asyncio.to_thread(
-                    _extract_pptx_media_images,
-                    local_path,
-                    out_dir,
-                    max_images=max_images,
-                )
-                if not image_paths:
-                    await status.edit_text(t(ui_lang, "scan_pdf_no_images"))
-                    return
-
-                await state.update_data(
-                    ai_session_id=session_id,
-                    ai_mode="scanpptx",
-                    ai_difficulty="",
-                    ai_ui_lang=ui_lang,
-                    ai_image_paths=image_paths,
-                    ai_max_questions=len(image_paths),
-                    ai_pages_total=len(image_paths),
-                    ai_title=Path(file_name).stem,
-                    ai_chat_id=message.chat.id,
-                    ai_chat_type=message.chat.type,
-                    ai_user_id=message.from_user.id if message.from_user else 0,
-                )
-                await state.set_state(AIQuizStates.choose_count)
-                await status.edit_text(
-                    t(ui_lang, "scan_pdf_choose_count", pages=len(image_paths), max_n=min(50, len(image_paths))),
-                    reply_markup=_kb_counts(session_id, max_n=len(image_paths), ui_lang=ui_lang, show_pages=True),
-                )
-                return
-
-            await status.edit_text(t(ui_lang, "text_too_short"))
-            return
-
-        # Store extracted text and ask for settings (count/time/lang) before generating.
         session_id = uuid.uuid4().hex
-        data_out: Dict[str, Any] = dict(
+        await state.update_data(
             ai_session_id=session_id,
             ai_mode="file",
             ai_difficulty="",
@@ -5553,23 +5859,15 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
             ai_chat_type=message.chat.type,
             ai_user_id=message.from_user.id if message.from_user else 0,
             ai_topic=topic,
+            ai_pages_total=1,
+            ai_pages_return="count",
+            ai_pages_required=True,
         )
-        if suffix == ".pdf":
-            pages_total = await asyncio.to_thread(_pdf_page_count, local_path)
-            data_out["ai_pdf_path"] = str(local_path)
-            data_out["ai_pages_total"] = int(pages_total or 0)
-        if suffix == ".pptx":
-            pages_total = await asyncio.to_thread(_pptx_slide_count, local_path)
-            data_out["ai_pptx_path"] = str(local_path)
-            data_out["ai_pages_total"] = int(pages_total or 0)
-        await state.update_data(**data_out)
-        await state.set_state(AIQuizStates.choose_count)
+        await state.set_state(AIQuizStates.choose_pages)
         await status.edit_text(
-            t(ui_lang, "choose_count", max_n=50),
-            reply_markup=_kb_counts(session_id, ui_lang=ui_lang, show_pages=(suffix in {".pdf", ".pptx"})),
+            t(ui_lang, "pages_prompt", total=1),
+            reply_markup=_kb_page_presets(session_id, 1, ui_lang=ui_lang),
         )
-        if suffix in {".pdf", ".pptx"}:
-            cleanup_local = False
 
     except AIServiceError as exc:
         await status.edit_text(t(ui_lang, "err_ai", err=str(exc)))

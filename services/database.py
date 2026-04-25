@@ -96,6 +96,8 @@ class Quiz(Base):
     title = Column(Text, default="")
     is_ai_generated = Column(Boolean, default=False)
     open_period = Column(Integer, default=30)  # seconds per question (poll open_period)
+    shuffle_mode = Column(Text, default="none")
+    shuffle_strategy = Column(Text, default="saved")
     questions = relationship('Question', backref='quiz')
 
 class Question(Base):
@@ -341,13 +343,32 @@ async def set_user_ui_lang(user_id: int, ui_lang: str) -> None:
         await session.commit()
 
 
-async def create_quiz(title: str, creator_id: int, is_ai_generated: bool = False, open_period: int = 30) -> int:
+async def create_quiz(
+    title: str,
+    creator_id: int,
+    is_ai_generated: bool = False,
+    open_period: int = 30,
+    shuffle_mode: str = "none",
+    shuffle_strategy: str = "saved",
+) -> int:
+    shuffle_mode = str(shuffle_mode or "none").strip().lower()
+    if shuffle_mode not in {"none", "questions", "options", "both"}:
+        shuffle_mode = "none"
+
+    shuffle_strategy = str(shuffle_strategy or "saved").strip().lower()
+    if shuffle_strategy not in {"saved", "runtime"}:
+        shuffle_strategy = "saved"
+    if shuffle_mode == "none":
+        shuffle_strategy = "saved"
+
     async with async_session() as session:
         quiz = Quiz(
             title=title,
             creator_id=creator_id,
             is_ai_generated=is_ai_generated,
             open_period=max(5, min(600, int(open_period or 30))),
+            shuffle_mode=shuffle_mode,
+            shuffle_strategy=shuffle_strategy,
         )
         session.add(quiz)
         await session.commit()
@@ -476,7 +497,6 @@ async def init_db():
         # Lightweight migrations for Postgres (handle Telegram IDs > int32).
         try:
             if str(engine.url).startswith("postgresql"):
-                # Drop FK constraints that reference users.id so we can alter types.
                 drop_fks = [
                     "ALTER TABLE user_settings DROP CONSTRAINT IF EXISTS user_settings_user_id_fkey",
                     "ALTER TABLE free_trial_quotas DROP CONSTRAINT IF EXISTS free_trial_quotas_user_id_fkey",
@@ -489,7 +509,6 @@ async def init_db():
                 for sql in drop_fks:
                     await conn.exec_driver_sql(sql)
 
-                # Alter columns to BIGINT.
                 alter_cols = [
                     "ALTER TABLE users ALTER COLUMN id TYPE BIGINT",
                     "ALTER TABLE user_settings ALTER COLUMN user_id TYPE BIGINT",
@@ -505,7 +524,6 @@ async def init_db():
                 for sql in alter_cols:
                     await conn.exec_driver_sql(sql)
 
-                # Recreate FK constraints.
                 add_fks = [
                     "ALTER TABLE user_settings ADD CONSTRAINT user_settings_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)",
                     "ALTER TABLE free_trial_quotas ADD CONSTRAINT free_trial_quotas_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)",
@@ -517,13 +535,25 @@ async def init_db():
                 ]
                 for sql in add_fks:
                     await conn.exec_driver_sql(sql)
+
                 try:
                     await conn.exec_driver_sql("ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TEXT DEFAULT ''")
                     await conn.exec_driver_sql("UPDATE users SET created_at='' WHERE created_at IS NULL")
                 except Exception:
                     pass
+                try:
+                    await conn.exec_driver_sql("ALTER TABLE quizzes ADD COLUMN IF NOT EXISTS shuffle_mode TEXT DEFAULT 'none'")
+                    await conn.exec_driver_sql("UPDATE quizzes SET shuffle_mode='none' WHERE shuffle_mode IS NULL OR shuffle_mode=''")
+                except Exception:
+                    pass
+                try:
+                    await conn.exec_driver_sql("ALTER TABLE quizzes ADD COLUMN IF NOT EXISTS shuffle_strategy TEXT DEFAULT 'saved'")
+                    await conn.exec_driver_sql("UPDATE quizzes SET shuffle_strategy='saved' WHERE shuffle_strategy IS NULL OR shuffle_strategy=''")
+                except Exception:
+                    pass
         except Exception as exc:
             logging.warning("Postgres bigint migration skipped/failed: %s", exc)
+
         # Lightweight migrations for SQLite (create_all doesn't alter existing tables).
         try:
             if str(engine.url).startswith("sqlite"):
@@ -538,6 +568,12 @@ async def init_db():
                 if "open_period" not in cols:
                     await conn.exec_driver_sql("ALTER TABLE quizzes ADD COLUMN open_period INTEGER DEFAULT 30")
                     await conn.exec_driver_sql("UPDATE quizzes SET open_period=30 WHERE open_period IS NULL")
+                if "shuffle_mode" not in cols:
+                    await conn.exec_driver_sql("ALTER TABLE quizzes ADD COLUMN shuffle_mode TEXT DEFAULT 'none'")
+                    await conn.exec_driver_sql("UPDATE quizzes SET shuffle_mode='none' WHERE shuffle_mode IS NULL OR shuffle_mode=''")
+                if "shuffle_strategy" not in cols:
+                    await conn.exec_driver_sql("ALTER TABLE quizzes ADD COLUMN shuffle_strategy TEXT DEFAULT 'saved'")
+                    await conn.exec_driver_sql("UPDATE quizzes SET shuffle_strategy='saved' WHERE shuffle_strategy IS NULL OR shuffle_strategy=''")
 
                 res = await conn.exec_driver_sql("PRAGMA table_info(questions)")
                 cols = {row[1] for row in res.fetchall()}
@@ -860,6 +896,8 @@ async def get_quiz_with_questions(quiz_id: int) -> Optional[dict]:
             "creator_id": int(quiz.creator_id or 0),
             "is_ai_generated": bool(quiz.is_ai_generated),
             "open_period": int(getattr(quiz, "open_period", 30) or 30),
+            "shuffle_mode": str(getattr(quiz, "shuffle_mode", "none") or "none"),
+            "shuffle_strategy": str(getattr(quiz, "shuffle_strategy", "saved") or "saved"),
             "questions": questions,
         }
 
@@ -873,6 +911,8 @@ async def get_quiz_summary(quiz_id: int) -> Optional[dict]:
                 Quiz.creator_id,
                 Quiz.is_ai_generated,
                 Quiz.open_period,
+                Quiz.shuffle_mode,
+                Quiz.shuffle_strategy,
                 func.count(Question.id).label("question_count"),
             )
             .outerjoin(Question, Question.quiz_id == Quiz.id)
@@ -888,6 +928,8 @@ async def get_quiz_summary(quiz_id: int) -> Optional[dict]:
             "creator_id": int(row.creator_id or 0),
             "is_ai_generated": bool(row.is_ai_generated),
             "open_period": int(getattr(row, "open_period", 30) or 30),
+            "shuffle_mode": str(getattr(row, "shuffle_mode", "none") or "none"),
+            "shuffle_strategy": str(getattr(row, "shuffle_strategy", "saved") or "saved"),
             "question_count": int(row.question_count or 0),
         }
         

@@ -1,4 +1,5 @@
 ﻿import json
+import random
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -130,6 +131,24 @@ def _strip_correct_marker(text: str) -> tuple[str, bool]:
         v = re.sub(r"(?i)\b(correct|to['?]g['?]ri)\b", "", v).strip(" -:()")
 
     return v, marked
+
+
+def _shuffle_question_options(payload: Dict[str, Any]) -> Dict[str, Any]:
+    options = list(payload.get("options") or [])
+    try:
+        correct_index = int(payload.get("correct_index"))
+    except Exception:
+        return payload
+
+    if len(options) != 4 or correct_index < 0 or correct_index >= len(options):
+        return payload
+
+    order = list(range(len(options)))
+    random.shuffle(order)
+    payload["options"] = [options[i] for i in order]
+    payload["correct_index"] = int(order.index(correct_index))
+    return payload
+
 def _normalize_question(q: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     text = str(q.get("question") or q.get("text") or "").strip()
     options = q.get("options") or q.get("variants") or []
@@ -156,6 +175,7 @@ def _normalize_question(q: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             ci = None
     if ci is None or ci < 0 or ci > 3:
         return None
+
 
     explanation = str(q.get("explanation") or q.get("comment") or "").strip()
     return {

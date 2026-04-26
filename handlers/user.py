@@ -109,6 +109,18 @@ _UI_LANG_CACHE: Dict[int, tuple[str, float]] = {}
 _UI_LANG_TTL_SEC = 600.0
 _PAUSED_RUNS: Dict[str, "PausedRun"] = {}
 _PAUSED_RUNS_TTL_SEC = 24 * 60 * 60  # best-effort, in-memory only
+_PENDING_AFTER_SUB: Dict[int, str] = {}
+_MANUAL_CORRECT_LOCKS: Dict[int, asyncio.Lock] = {}
+_START_LANG_PROMPT = "🌐 Interfeys tili / Interface language / Язык интерфейса"
+
+
+def _manual_correct_lock(user_id: int) -> asyncio.Lock:
+    user_id = int(user_id or 0)
+    lock = _MANUAL_CORRECT_LOCKS.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _MANUAL_CORRECT_LOCKS[user_id] = lock
+    return lock
 
 
 async def _get_ui_lang(user_id: int) -> str:
@@ -128,6 +140,54 @@ def _set_ui_lang_cache(user_id: int, ui_lang: str) -> None:
     if not user_id:
         return
     _UI_LANG_CACHE[int(user_id)] = (norm_ui_lang(ui_lang), time.monotonic())
+
+
+def _set_pending_after_sub(user_id: int, action: str) -> None:
+    if not user_id:
+        return
+    action = str(action or "").strip()
+    if action:
+        _PENDING_AFTER_SUB[int(user_id)] = action
+
+
+def _pop_pending_after_sub(user_id: int) -> str:
+    if not user_id:
+        return ""
+    return str(_PENDING_AFTER_SUB.pop(int(user_id), "") or "")
+
+
+def _lang_flag(code: str) -> str:
+    c = str(code or "").strip().lower()
+    return {
+        "uz": "🇺🇿",
+        "ru": "🇷🇺",
+        "en": "🇬🇧",
+        "de": "🇩🇪",
+        "tr": "🇹🇷",
+        "kk": "🇰🇿",
+        "ar": "🇸🇦",
+        "zh": "🇨🇳",
+        "ko": "🇰🇷",
+    }.get(c, "🌐")
+
+
+def _lang_self_name(code: str) -> str:
+    c = str(code or "").strip().lower()
+    return {
+        "uz": "O'zbek",
+        "ru": "Русский",
+        "en": "English",
+        "de": "Deutsch",
+        "tr": "Türkçe",
+        "kk": "Қазақша",
+        "ar": "العربية",
+        "zh": "中文",
+        "ko": "한국어",
+    }.get(c, c or "")
+
+
+def _lang_label_with_flag(code: str) -> str:
+    return f"{_lang_flag(code)} {_lang_self_name(code)}".strip()
 
 
 @dataclass
@@ -1115,9 +1175,13 @@ async def _run_quiz(bot: Bot, run: QuizRun) -> None:
         _ACTIVE_RUNS.pop(run.run_id, None)
 
 
-def _kb_main_menu(ui_lang: str, *, user_id: int = 0) -> types.InlineKeyboardMarkup:
+def _kb_main_menu(ui_lang: str, *, user_id: int = 0, show_start_lang: bool = False) -> types.InlineKeyboardMarkup:
     ui_lang = norm_ui_lang(ui_lang)
     kb = InlineKeyboardBuilder()
+
+    if show_start_lang:
+        for code in ("uz", "en", "ru"):
+            kb.button(text=_lang_label_with_flag(code), callback_data=f"set_ui_lang:{code}")
 
     kb.button(text=t(ui_lang, "btn_upload"), callback_data="menu_upload")
     if AI_ENABLED:
@@ -1128,16 +1192,74 @@ def _kb_main_menu(ui_lang: str, *, user_id: int = 0) -> types.InlineKeyboardMark
     if int(user_id or 0) in set(int(x) for x in (ADMIN_IDS or [])):
         kb.button(text=t(ui_lang, "btn_admin_users"), callback_data="menu_admin_users")
 
+    rows: list[int] = []
+    if show_start_lang:
+        rows.append(3)
+    rows.extend([2, 2, 1])
     if int(user_id or 0) in set(int(x) for x in (ADMIN_IDS or [])):
-        kb.adjust(2, 2, 1, 1)
-    elif AI_ENABLED:
-        kb.adjust(2, 2, 1)
-    else:
-        kb.adjust(2, 2, 1)
+        rows.append(1)
+    kb.adjust(*rows)
 
     return kb.as_markup()
 
 
+
+
+async def _open_upload_flow(message: types.Message, state: FSMContext, *, ui_lang: str) -> None:
+    await state.clear()
+    await state.set_state(UploadStates.await_file)
+    key = "upload_hint" if AI_ENABLED else "upload_hint_noai"
+    await message.answer(t(ui_lang, key))
+
+
+async def _open_topic_flow(message: types.Message, state: FSMContext, *, user_id: int, ui_lang: str) -> None:
+    await state.clear()
+    if not AI_ENABLED:
+        await message.answer(t(ui_lang, "ai_disabled"))
+        return
+    session_id = uuid.uuid4().hex
+    await state.update_data(
+        ai_session_id=session_id,
+        ai_mode="topic",
+        ai_difficulty="",
+        ai_title="",
+        ai_ui_lang=ui_lang,
+        ai_chat_id=message.chat.id,
+        ai_chat_type=message.chat.type,
+        ai_user_id=user_id,
+        ai_topic_return="count",
+    )
+    await state.set_state(AIQuizStates.choose_topic)
+    await message.answer(t(ui_lang, "topic_prompt"))
+
+
+async def _open_manual_quiz_flow(message: types.Message, state: FSMContext, *, user_id: int, ui_lang: str) -> None:
+    await state.clear()
+    draft = await get_manual_quiz_draft(user_id=user_id)
+    if draft and str(draft.get("state") or "").strip():
+        await message.answer(t(ui_lang, "manual_draft_found"), reply_markup=_kb_manual_draft_choice(ui_lang=ui_lang))
+        return
+    await state.update_data(m_ui_lang=ui_lang)
+    await state.set_state(ManualQuizStates.title)
+    await _persist_manual_draft(state, user_id=user_id, chat_id=message.chat.id)
+    await message.answer(t(ui_lang, "manual_title_prompt"))
+
+
+async def _resume_pending_after_sub(call: types.CallbackQuery, state: FSMContext) -> bool:
+    action = _pop_pending_after_sub(call.from_user.id if call.from_user else 0)
+    if not action or not call.message or not call.from_user:
+        return False
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    if action == "menu_upload":
+        await _open_upload_flow(call.message, state, ui_lang=ui_lang)
+        return True
+    if action == "menu_topic":
+        await _open_topic_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang)
+        return True
+    if action == "menu_newquiz":
+        await _open_manual_quiz_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang)
+        return True
+    return False
 
 
 def _required_channel_url() -> str:
@@ -1175,7 +1297,7 @@ async def _is_user_subscribed(bot: Bot, user_id: int) -> bool:
     except Exception:
         return False
 
-async def _ensure_subscribed(event: object, bot: Bot, user_id: int) -> bool:
+async def _ensure_subscribed(event: object, bot: Bot, user_id: int, *, pending_action: str = "") -> bool:
     user_id = int(user_id or 0)
     ch = str(REQUIRED_CHANNEL or "").strip()
     if not ch:
@@ -1203,6 +1325,9 @@ async def _ensure_subscribed(event: object, bot: Bot, user_id: int) -> bool:
         except Exception:
             pass
         return True
+
+    if pending_action:
+        _set_pending_after_sub(user_id, pending_action)
 
     ui_lang = await _get_ui_lang(user_id)
     try:
@@ -1274,15 +1399,8 @@ async def cmd_start_deeplink(
                 await record_referral_invite(referrer_id=ref_id, referred_user_id=message.from_user.id)
             except Exception:
                 pass
-        # Enforce subscription after recording referral.
-        if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-            return
-        # Continue as normal (no special screen).
         payload = ''
 
-    # Enforce subscription for other deep links.
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-        return
     if payload.startswith("quiz_"):
         raw_id = payload.split("_", 1)[1]
         try:
@@ -1317,7 +1435,8 @@ async def cmd_start_deeplink(
         return
 
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
-    await message.answer(get_about_text(ui_lang), reply_markup=_kb_main_menu(ui_lang, user_id=message.from_user.id if message.from_user else 0))
+    start_text = get_about_text(ui_lang) + "\n\n" + _START_LANG_PROMPT
+    await message.answer(start_text, reply_markup=_kb_main_menu(ui_lang, user_id=message.from_user.id if message.from_user else 0, show_start_lang=True))
 
 
 @router.message(CommandStart())
@@ -1331,19 +1450,18 @@ async def cmd_start(message: types.Message, state: FSMContext, bot: Bot) -> None
         )
         await get_or_create_user_settings(user_id=message.from_user.id)
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
-    await message.answer(get_about_text(ui_lang), reply_markup=_kb_main_menu(ui_lang, user_id=message.from_user.id if message.from_user else 0))
+    start_text = get_about_text(ui_lang) + "\n\n" + _START_LANG_PROMPT
+    await message.answer(start_text, reply_markup=_kb_main_menu(ui_lang, user_id=message.from_user.id if message.from_user else 0, show_start_lang=True))
 
 
 @router.message(Command("menu"))
 async def cmd_menu(message: types.Message, bot: Bot) -> None:
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-        return
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
     await message.answer(t(ui_lang, "menu_help"), reply_markup=_kb_main_menu(ui_lang, user_id=message.from_user.id if message.from_user else 0))
 
 
 @router.callback_query(F.data == "check_sub")
-async def check_subscription(call: types.CallbackQuery, bot: Bot) -> None:
+async def check_subscription(call: types.CallbackQuery, bot: Bot, state: FSMContext) -> None:
     ui_lang = await _get_ui_lang(call.from_user.id if call.from_user else 0)
     ch = str(REQUIRED_CHANNEL or "").strip()
 
@@ -1359,14 +1477,15 @@ async def check_subscription(call: types.CallbackQuery, bot: Bot) -> None:
         return
 
     await call.answer(t(ui_lang, "sub_check_ok"), show_alert=False)
-    if call.message:
-        await call.message.answer(get_about_text(ui_lang), reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0))
+    resumed = await _resume_pending_after_sub(call, state)
+    if call.message and not resumed:
+        await call.message.answer(get_about_text(ui_lang), reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0, show_start_lang=True))
 
 
 
 @router.message(Command("topic"))
 async def cmd_topic(message: types.Message, state: FSMContext, bot: Bot) -> None:
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0, pending_action="menu_topic"):
         return
     if not message.from_user:
         return
@@ -1899,7 +2018,7 @@ def _kb_ui_language_settings(ui_lang: str) -> types.InlineKeyboardMarkup:
     ui_lang = norm_ui_lang(ui_lang)
     kb = InlineKeyboardBuilder()
     for code in ("uz", "ru", "en", "de", "tr", "kk", "ar", "zh", "ko"):
-        kb.button(text=lang_name(code), callback_data=f"set_ui_lang:{code}")
+        kb.button(text=_lang_label_with_flag(code), callback_data=f"set_ui_lang:{code}")
     kb.adjust(3, 3, 3)
     return kb.as_markup()
 
@@ -1908,16 +2027,12 @@ def _kb_ui_language_settings(ui_lang: str) -> types.InlineKeyboardMarkup:
 @router.message(Command("til"))
 @router.message(Command("lang"))
 async def cmd_ui_language(message: types.Message, bot: Bot) -> None:
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-        return
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
     await message.answer(t(ui_lang, "ui_lang_choose"), reply_markup=_kb_ui_language_settings(ui_lang))
 
 
 @router.callback_query(F.data == "menu_ui_language")
 async def menu_ui_language(call: types.CallbackQuery, bot: Bot) -> None:
-    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
-        return
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
     if call.message:
@@ -1926,8 +2041,6 @@ async def menu_ui_language(call: types.CallbackQuery, bot: Bot) -> None:
 
 @router.message(Command("language"))
 async def cmd_language(message: types.Message, bot: Bot) -> None:
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-        return
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
     if not AI_ENABLED:
         await message.answer(t(ui_lang, "ai_disabled"))
@@ -1937,8 +2050,6 @@ async def cmd_language(message: types.Message, bot: Bot) -> None:
 
 @router.callback_query(F.data == "menu_language")
 async def menu_language(call: types.CallbackQuery, bot: Bot) -> None:
-    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
-        return
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
     if not AI_ENABLED:
@@ -1980,68 +2091,32 @@ async def set_lang(call: types.CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu_upload")
 async def menu_upload(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
+    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0, pending_action="menu_upload"):
         return
     await call.answer()
-    await state.clear()
     ui_lang = await _get_ui_lang(call.from_user.id)
-    await state.set_state(UploadStates.await_file)
     if call.message:
-        key = "upload_hint" if AI_ENABLED else "upload_hint_noai"
-        await call.message.answer(t(ui_lang, key))
+        await _open_upload_flow(call.message, state, ui_lang=ui_lang)
 
 
 @router.callback_query(F.data == "menu_topic")
 async def menu_topic(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
+    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0, pending_action="menu_topic"):
         return
     await call.answer()
-    await state.clear()
     ui_lang = await _get_ui_lang(call.from_user.id)
-    if not AI_ENABLED:
-        if call.message:
-            await call.message.answer(t(ui_lang, "ai_disabled"))
-        return
-    session_id = uuid.uuid4().hex
-    await state.update_data(
-        ai_session_id=session_id,
-        ai_mode="topic",
-        ai_difficulty="",
-        ai_title="",
-        ai_ui_lang=ui_lang,
-        ai_chat_id=call.message.chat.id if call.message else 0,
-        ai_chat_type=call.message.chat.type if call.message else "private",
-        ai_user_id=call.from_user.id,
-        ai_topic_return="count",
-    )
-    await state.set_state(AIQuizStates.choose_topic)
     if call.message:
-        await call.message.answer(t(ui_lang, "topic_prompt"))
+        await _open_topic_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang)
 
 
 @router.callback_query(F.data == "menu_newquiz")
 async def menu_newquiz(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
+    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0, pending_action="menu_newquiz"):
         return
     await call.answer()
-    await state.clear()
     ui_lang = await _get_ui_lang(call.from_user.id)
-    draft = await get_manual_quiz_draft(user_id=call.from_user.id)
-    if draft and str(draft.get("state") or "").strip():
-        if call.message:
-            await call.message.answer(
-                t(ui_lang, "manual_draft_found"),
-                reply_markup=_kb_manual_draft_choice(ui_lang=ui_lang),
-            )
-        else:
-            await call.answer(t(ui_lang, "manual_draft_found"), show_alert=True)
-        return
-
-    await state.update_data(m_ui_lang=ui_lang)
-    await state.set_state(ManualQuizStates.title)
     if call.message:
-        await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
-        await call.message.answer(t(ui_lang, "manual_title_prompt"))
+        await _open_manual_quiz_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang)
 
 
 
@@ -2144,8 +2219,6 @@ def _premium_menu_text(ui_lang: str, status: dict) -> str:
 
 @router.message(Command('premium'))
 async def cmd_premium(message: types.Message, bot: Bot) -> None:
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-        return
     if not message.from_user:
         return
     ui_lang = await _get_ui_lang(message.from_user.id)
@@ -2155,8 +2228,6 @@ async def cmd_premium(message: types.Message, bot: Bot) -> None:
 
 @router.callback_query(F.data == 'menu_premium')
 async def menu_premium(call: types.CallbackQuery, bot: Bot) -> None:
-    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
-        return
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
     st = await get_user_quota_status(call.from_user.id)
@@ -2826,8 +2897,6 @@ async def menu_admin_users(call: types.CallbackQuery, bot: Bot) -> None:
 
 @router.callback_query(F.data == "menu_myquizzes")
 async def menu_myquizzes(call: types.CallbackQuery, bot: Bot) -> None:
-    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
-        return
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
     quizzes = await list_user_quizzes(call.from_user.id, limit=20)
@@ -2865,8 +2934,6 @@ async def menu_myquizzes(call: types.CallbackQuery, bot: Bot) -> None:
 
 @router.message(Command("mytests"))
 async def cmd_mytests(message: types.Message, bot: Bot) -> None:
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
-        return
     if not message.from_user:
         return
     ui_lang = await _get_ui_lang(message.from_user.id)
@@ -2901,8 +2968,6 @@ async def cmd_mytests(message: types.Message, bot: Bot) -> None:
 
 @router.callback_query(F.data == "menu_cancel")
 async def menu_cancel(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
-        return
     await call.answer()
     chat_id = call.message.chat.id if call.message else 0
     cancelled = await _cancel_user_runs(bot, chat_id=chat_id, user_id=call.from_user.id)
@@ -2915,20 +2980,10 @@ async def menu_cancel(call: types.CallbackQuery, state: FSMContext, bot: Bot) ->
 
 @router.message(Command("newquiz"))
 async def cmd_newquiz(message: types.Message, state: FSMContext, bot: Bot) -> None:
-    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
+    if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0, pending_action="menu_newquiz"):
         return
-    await state.clear()
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
-
-    draft = await get_manual_quiz_draft(user_id=message.from_user.id if message.from_user else 0)
-    if draft and str(draft.get("state") or "").strip():
-        await message.answer(t(ui_lang, "manual_draft_found"), reply_markup=_kb_manual_draft_choice(ui_lang=ui_lang))
-        return
-
-    await state.update_data(m_ui_lang=ui_lang)
-    await state.set_state(ManualQuizStates.title)
-    await _persist_manual_draft(state, user_id=message.from_user.id if message.from_user else 0, chat_id=message.chat.id)
-    await message.answer(t(ui_lang, "manual_title_prompt"))
+    await _open_manual_quiz_flow(message, state, user_id=message.from_user.id if message.from_user else 0, ui_lang=ui_lang)
 
 
 class ManualQuizStates(StatesGroup):
@@ -3036,6 +3091,66 @@ async def _persist_manual_draft(state: FSMContext, *, user_id: int, chat_id: int
     except Exception:
         # Best-effort only.
         return
+
+
+async def _restore_manual_draft_if_needed(state: FSMContext, *, user_id: int, ui_lang: str) -> Dict[str, Any]:
+    data = await state.get_data()
+    st = await state.get_state()
+    data = data if isinstance(data, dict) else {}
+
+    draft = await get_manual_quiz_draft(user_id=user_id)
+    if not draft:
+        return data
+
+    draft_data = draft.get("data") or {}
+    if not isinstance(draft_data, dict):
+        draft_data = {}
+    restored_lang = norm_ui_lang(str(draft_data.get("m_ui_lang") or data.get("m_ui_lang") or ui_lang))
+    restored_state = str(draft.get("state") or st or "").strip()
+    if not restored_state.startswith("ManualQuizStates:"):
+        restored_state = ManualQuizStates.title.state
+
+    if data and st and str(st).startswith("ManualQuizStates:"):
+        merged = dict(data)
+        for key in (
+            "m_ui_lang",
+            "title",
+            "m_open_period",
+            "m_shuffle_mode",
+            "m_shuffle_strategy",
+            "questions",
+            "current_question",
+            "current_options",
+            "current_image_file_id",
+        ):
+            value = merged.get(key)
+            if value in (None, "", [], {}):
+                draft_value = draft_data.get(key)
+                if draft_value not in (None, "", [], {}):
+                    merged[key] = draft_value
+        merged["m_ui_lang"] = restored_lang
+        if merged != data:
+            await state.update_data(**merged)
+        return merged
+
+    await state.clear()
+    await state.update_data(**draft_data, m_ui_lang=restored_lang)
+    await state.set_state(restored_state)
+    return await state.get_data()
+
+
+def _manual_finish_keyboard(*, ui_lang: str, show_edit_last: bool = True) -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    if show_edit_last:
+        kb.button(text=t(ui_lang, "btn_edit_quiz"), callback_data="m_edit_last")
+    kb.button(text=t(ui_lang, "btn_manual_add_more"), callback_data="m_add_more")
+    kb.button(text=t(ui_lang, "btn_manual_finish"), callback_data="m_finish")
+    if show_edit_last:
+        kb.adjust(1, 2)
+    else:
+        kb.adjust(2)
+    return kb.as_markup()
 
 
 @router.callback_query(F.data == "m_draft:restart")
@@ -3324,83 +3439,148 @@ async def manual_options(message: types.Message, state: FSMContext) -> None:
 @router.callback_query(F.data.startswith("m_correct:"))
 async def manual_correct(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()
-    data = await state.get_data()
-    ui_lang = norm_ui_lang(str(data.get("m_ui_lang") or ""))
-    if not data.get("m_ui_lang"):
-        ui_lang = await _get_ui_lang(call.from_user.id)
-    try:
-        correct_index = int(call.data.split(":", 1)[1])
-    except Exception:
-        await call.message.answer(t(ui_lang, "manual_callback_error"))
+    if call.message:
+        with suppress(Exception):
+            await call.message.edit_reply_markup(reply_markup=None)
+    user_id = call.from_user.id if call.from_user else 0
+    async with _manual_correct_lock(user_id):
+        ui_lang = await _get_ui_lang(user_id)
+        data = await _restore_manual_draft_if_needed(state, user_id=user_id, ui_lang=ui_lang)
+        ui_lang = norm_ui_lang(str(data.get("m_ui_lang") or ui_lang))
+        try:
+            correct_index = int(call.data.split(":", 1)[1])
+        except Exception:
+            if call.message:
+                await call.message.answer(t(ui_lang, "manual_callback_error"))
+            return
+
+        question_text = str(data.get("current_question") or "").strip()
+        options = data.get("current_options") or []
+        image_file_id = str(data.get("current_image_file_id") or "").strip()
+        questions: List[Dict[str, Any]] = data.get("questions") or []
+
+        if not question_text or not isinstance(options, list) or len(options) != 4:
+            if call.message:
+                if questions:
+                    current_state = await state.get_state()
+                    if not current_state or not str(current_state).startswith("ManualQuizStates:"):
+                        await state.set_state(ManualQuizStates.choose_correct)
+                    await state.update_data(
+                        questions=questions,
+                        current_question="",
+                        current_options=[],
+                        current_image_file_id="",
+                    )
+                    await _persist_manual_draft(state, user_id=user_id, chat_id=call.message.chat.id)
+                    await call.message.answer(
+                        t(ui_lang, "manual_saved_total", n=len(questions)),
+                        reply_markup=_manual_finish_keyboard(ui_lang=ui_lang, show_edit_last=bool(questions)),
+                    )
+                else:
+                    await call.message.answer(t(ui_lang, "manual_question_missing"))
+            return
+
+        questions.append(
+            {
+                "question": question_text,
+                "options": options,
+                "correct_index": max(0, min(3, correct_index)),
+                "explanation": "",
+                "image_file_id": image_file_id,
+            }
+        )
+
+        await state.update_data(
+            questions=questions,
+            current_question="",
+            current_options=[],
+            current_image_file_id="",
+        )
+        await state.set_state(ManualQuizStates.choose_correct)
+
+        if call.message:
+            await _persist_manual_draft(state, user_id=user_id, chat_id=call.message.chat.id)
+            await call.message.answer(
+                t(ui_lang, "manual_saved_total", n=len(questions)),
+                reply_markup=_manual_finish_keyboard(ui_lang=ui_lang, show_edit_last=bool(questions)),
+            )
+
+
+@router.callback_query(F.data == "m_edit_last")
+async def manual_edit_last(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    data = await _restore_manual_draft_if_needed(state, user_id=call.from_user.id, ui_lang=ui_lang)
+    ui_lang = norm_ui_lang(str(data.get("m_ui_lang") or ui_lang))
+    questions = data.get("questions") or []
+    if not isinstance(questions, list) or not questions:
+        if call.message:
+            await call.message.answer(t(ui_lang, "manual_empty"))
         return
 
-    question_text = str(data.get("current_question") or "").strip()
-    options = data.get("current_options") or []
-    image_file_id = str(data.get("current_image_file_id") or "").strip()
-    questions: List[Dict[str, Any]] = data.get("questions") or []
-
-    if not question_text or not isinstance(options, list) or len(options) != 4:
-        await call.message.answer(t(ui_lang, "manual_question_missing"))
-        await state.clear()
-        await clear_manual_quiz_draft(user_id=call.from_user.id)
+    last = questions[-1]
+    remaining = questions[:-1]
+    current_question = str(last.get("question") or "").strip()
+    current_options = last.get("options") or []
+    current_image_file_id = str(last.get("image_file_id") or "").strip()
+    if not current_question or not isinstance(current_options, list) or len(current_options) != 4:
+        if call.message:
+            await call.message.answer(t(ui_lang, "manual_question_missing"))
         return
-
-    questions.append(
-        {
-            "question": question_text,
-            "options": options,
-            "correct_index": max(0, min(3, correct_index)),
-            "explanation": "",
-            "image_file_id": image_file_id,
-        }
-    )
 
     await state.update_data(
-        questions=questions,
-        current_question=None,
-        current_options=None,
-        current_image_file_id=None,
+        questions=remaining,
+        current_question=current_question,
+        current_options=current_options,
+        current_image_file_id=current_image_file_id,
     )
-
+    await state.set_state(ManualQuizStates.choose_correct)
     if call.message:
         await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
-
-    kb = InlineKeyboardBuilder()
-    kb.button(text=t(ui_lang, "btn_manual_add_more"), callback_data="m_add_more")
-    kb.button(text=t(ui_lang, "btn_manual_finish"), callback_data="m_finish")
-    kb.adjust(2)
-
-    await call.message.answer(t(ui_lang, "manual_saved_total", n=len(questions)), reply_markup=kb.as_markup())
+        prompt, markup = _manual_prompt_for_state(
+            ui_lang=ui_lang,
+            state_str=ManualQuizStates.choose_correct.state,
+            data=await state.get_data(),
+        )
+        await call.message.answer(prompt, reply_markup=markup)
 
 
 @router.callback_query(F.data == "m_add_more")
 async def manual_add_more(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()
-    data = await state.get_data()
-    ui_lang = norm_ui_lang(str(data.get("m_ui_lang") or ""))
-    if not data.get("m_ui_lang"):
-        ui_lang = await _get_ui_lang(call.from_user.id)
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    data = await _restore_manual_draft_if_needed(state, user_id=call.from_user.id, ui_lang=ui_lang)
+    ui_lang = norm_ui_lang(str(data.get("m_ui_lang") or ui_lang))
     await state.set_state(ManualQuizStates.question)
     if call.message:
         await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
-    await call.message.answer(t(ui_lang, "manual_next_question"))
+        await call.message.answer(t(ui_lang, "manual_next_question"))
 
 
 @router.callback_query(F.data == "m_finish")
 async def manual_finish(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await call.answer()
 
-    data = await state.get_data()
-    ui_lang = norm_ui_lang(str(data.get("m_ui_lang") or ""))
-    if not data.get("m_ui_lang"):
-        ui_lang = await _get_ui_lang(call.from_user.id)
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    data = await _restore_manual_draft_if_needed(state, user_id=call.from_user.id, ui_lang=ui_lang)
+    ui_lang = norm_ui_lang(str(data.get("m_ui_lang") or ui_lang))
     title = str(data.get("title") or "").strip()
     questions: List[Dict[str, Any]] = data.get("questions") or []
 
     if not title or not questions:
-        await call.message.answer(t(ui_lang, "manual_empty"))
-        await state.clear()
-        await clear_manual_quiz_draft(user_id=call.from_user.id)
+        draft = await get_manual_quiz_draft(user_id=call.from_user.id)
+        draft_data = (draft or {}).get("data") or {}
+        if isinstance(draft_data, dict):
+            if not title:
+                title = str(draft_data.get("title") or "").strip()
+            if not questions:
+                restored_questions = draft_data.get("questions") or []
+                if isinstance(restored_questions, list):
+                    questions = restored_questions
+
+    if not title or not questions:
+        if call.message:
+            await call.message.answer(t(ui_lang, "manual_empty"))
         return
 
     user = call.from_user

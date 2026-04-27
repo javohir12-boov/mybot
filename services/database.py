@@ -33,6 +33,8 @@ class UserSettings(Base):
     default_lang = Column(Text, default="source")
     # UI language for bot messages: uz | ru | en
     ui_lang = Column(Text, default="uz")
+    # Whether user explicitly picked UI language at least once (used to show language picker on first /start).
+    ui_lang_picked = Column(Boolean, default=False)
 
 class FreeTrialQuota(Base):
     __tablename__ = 'free_trial_quotas'
@@ -304,13 +306,14 @@ async def get_or_create_user_settings(user_id: int) -> dict:
     async with async_session() as session:
         settings = await session.get(UserSettings, user_id)
         if settings is None:
-            settings = UserSettings(user_id=user_id, default_lang="source", ui_lang="uz")
+            settings = UserSettings(user_id=user_id, default_lang="source", ui_lang="uz", ui_lang_picked=False)
             session.add(settings)
             await session.commit()
             await session.refresh(settings)
         return {
             "default_lang": str(settings.default_lang or "source"),
             "ui_lang": str(getattr(settings, "ui_lang", "") or "uz"),
+            "ui_lang_picked": bool(getattr(settings, "ui_lang_picked", False) or False),
         }
 
 
@@ -336,10 +339,14 @@ async def set_user_ui_lang(user_id: int, ui_lang: str) -> None:
     async with async_session() as session:
         settings = await session.get(UserSettings, user_id)
         if settings is None:
-            settings = UserSettings(user_id=user_id, default_lang="source", ui_lang=ui_lang)
+            settings = UserSettings(user_id=user_id, default_lang="source", ui_lang=ui_lang, ui_lang_picked=True)
             session.add(settings)
         else:
             settings.ui_lang = ui_lang
+            try:
+                settings.ui_lang_picked = True
+            except Exception:
+                pass
         await session.commit()
 
 
@@ -541,6 +548,25 @@ async def init_db():
                     await conn.exec_driver_sql("UPDATE users SET created_at='' WHERE created_at IS NULL")
                 except Exception:
                     pass
+                # Add user_settings.ui_lang_picked only once (avoid flipping new users on every restart).
+                try:
+                    exists_res = await conn.exec_driver_sql(
+                        "SELECT 1 FROM information_schema.columns "
+                        "WHERE table_name='user_settings' AND column_name='ui_lang_picked' LIMIT 1"
+                    )
+                    exists = bool(exists_res.fetchone())
+                except Exception:
+                    exists = True
+                if not exists:
+                    try:
+                        await conn.exec_driver_sql("ALTER TABLE user_settings ADD COLUMN ui_lang_picked BOOLEAN DEFAULT FALSE")
+                    except Exception:
+                        pass
+                    try:
+                        # Preserve existing behavior: do not prompt existing users on /start after migration.
+                        await conn.exec_driver_sql("UPDATE user_settings SET ui_lang_picked=TRUE")
+                    except Exception:
+                        pass
                 try:
                     await conn.exec_driver_sql("ALTER TABLE quizzes ADD COLUMN IF NOT EXISTS shuffle_mode TEXT DEFAULT 'none'")
                     await conn.exec_driver_sql("UPDATE quizzes SET shuffle_mode='none' WHERE shuffle_mode IS NULL OR shuffle_mode=''")
@@ -562,6 +588,10 @@ async def init_db():
                 if "ui_lang" not in cols:
                     await conn.exec_driver_sql("ALTER TABLE user_settings ADD COLUMN ui_lang TEXT DEFAULT 'uz'")
                     await conn.exec_driver_sql("UPDATE user_settings SET ui_lang='uz' WHERE ui_lang IS NULL OR ui_lang=''")
+                if "ui_lang_picked" not in cols:
+                    await conn.exec_driver_sql("ALTER TABLE user_settings ADD COLUMN ui_lang_picked INTEGER DEFAULT 0")
+                    # Preserve existing behavior: do not prompt existing users on /start after migration.
+                    await conn.exec_driver_sql("UPDATE user_settings SET ui_lang_picked=1 WHERE ui_lang_picked IS NULL OR ui_lang_picked=0")
 
                 res = await conn.exec_driver_sql("PRAGMA table_info(quizzes)")
                 cols = {row[1] for row in res.fetchall()}
@@ -881,6 +911,7 @@ async def get_quiz_with_questions(quiz_id: int) -> Optional[dict]:
 
             questions.append(
                 {
+                    "question_id": int(r.id),
                     "question": str(r.text or ""),
                     "options": opts,
                     "correct_index": int(r.correct_answer or 0),
@@ -900,6 +931,22 @@ async def get_quiz_with_questions(quiz_id: int) -> Optional[dict]:
             "shuffle_strategy": str(getattr(quiz, "shuffle_strategy", "saved") or "saved"),
             "questions": questions,
         }
+
+
+async def update_question_correct_answer(*, quiz_id: int, question_id: int, correct_index: int) -> bool:
+    quiz_id = int(quiz_id or 0)
+    question_id = int(question_id or 0)
+    correct_index = max(0, min(3, int(correct_index or 0)))
+    if not quiz_id or not question_id:
+        return False
+
+    async with async_session() as session:
+        q = await session.get(Question, question_id)
+        if q is None or int(q.quiz_id or 0) != quiz_id:
+            return False
+        q.correct_answer = int(correct_index)
+        await session.commit()
+        return True
 
 
 async def get_quiz_summary(quiz_id: int) -> Optional[dict]:

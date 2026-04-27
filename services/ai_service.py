@@ -1,4 +1,5 @@
 ﻿import asyncio
+import base64
 import json
 import os
 import math
@@ -1051,10 +1052,10 @@ class AIService:
         output_language: str = "source",
         shuffle_options: bool = True,
     ) -> List[Dict[str, Any]]:
-        """Generate exactly 1 question per image (Gemini vision)."""
+        """Generate exactly 1 question per image (vision)."""
         provider = self._pick_provider()
-        if provider != "gemini":
-            raise AIServiceError("Rasmli savollar hozircha faqat Gemini bilan ishlaydi (AI_PROVIDER=gemini).")
+        if provider not in {"openai", "gemini"}:
+            raise AIServiceError("Rasmli savollar faqat OpenAI yoki Gemini (vision) bilan ishlaydi.")
 
         paths = [str(p) for p in (image_paths or []) if str(p).strip()]
         if not paths:
@@ -1064,7 +1065,10 @@ class AIService:
 
         out: List[Dict[str, Any]] = []
         for p in paths:
-            q = await self._generate_gemini_image(p, lang_instruction=lang_instruction, shuffle_options=shuffle_options)
+            if provider == "openai":
+                q = await self._generate_openai_image(p, lang_instruction=lang_instruction, shuffle_options=shuffle_options)
+            else:
+                q = await self._generate_gemini_image(p, lang_instruction=lang_instruction, shuffle_options=shuffle_options)
             out.append(q)
         return out
 
@@ -1699,6 +1703,113 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
                 raise
         data = _load_json_from_text(raw)
         return _normalize_quiz(data, shuffle_options=shuffle_options)
+
+    async def _generate_openai_image(
+        self,
+        image_path: str,
+        *,
+        lang_instruction: str,
+        shuffle_options: bool = True,
+    ) -> Dict[str, Any]:
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:
+            raise AIServiceError("openai not installed. Install: pip install openai") from exc
+
+        if not self.openai_api_key:
+            raise AIServiceError("OPENAI_API_KEY is not set")
+
+        p = Path(str(image_path or "").strip())
+        if not str(p):
+            raise AIServiceError("Image path is empty")
+        if not p.exists():
+            raise AIServiceError(f"Image file not found: {p}")
+
+        mime = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+        }.get(p.suffix.lower(), "image/png")
+
+        try:
+            b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+        except Exception as exc:
+            raise AIServiceError(f"Failed to read image: {exc}") from exc
+
+        data_url = f"data:{mime};base64,{b64}"
+
+        client = AsyncOpenAI(api_key=self.openai_api_key)
+
+        timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", os.getenv("AI_REQUEST_TIMEOUT_SEC", "60")) or 60)
+        timeout_sec = max(5.0, min(600.0, timeout_sec))
+        total_timeout = float(os.getenv("OPENAI_TOTAL_TIMEOUT_SEC", "0") or 0)
+        if total_timeout <= 0:
+            total_timeout = min(180.0, timeout_sec + 20.0)
+
+        system_prompt = (
+            "Sen professional testologsan. Berilgan rasm asosida 1 ta ko'p tanlovli savol (MCQ) yarat.\n"
+            "- Agar rasmda savol va 4 ta variant bo'lsa, ularni saqla.\n"
+            "- Agar variantlar to'liq bo'lmasa, 4 ta mantiqiy variant yarat.\n"
+            "- Variantlar bir xil uslubda bo'lsin (hammasi ibora yoki hammasi 1 gap)\n"
+            "- Variantlar uzunligi bir-biriga yaqin bo'lsin: eng uzun va eng qisqa variant farqi 2-3 so'zdan oshmasin\n"
+            "- Juda qisqa (1-2 so'zli) va juda uzun variantlardan qoching; har bir variant taxminan 4-10 so'z bo'lsin\n"
+            "- Variantlarda izoh/tushuntirish bo'lmasin; izoh faqat explanation ga yozilsin\n"
+            "- Noto'g'ri variantlar ham mantiqan ishonarli bo'lsin, to'g'ri javob ko'zga tashlanib qolmasin\n"
+            "- correct_index 0..3 bo'lsin\n"
+            "- explanation qisqa bo'lsin\n"
+            f"- Til: {lang_instruction}\n"
+            "- Muhim: EXACTLY 1 ta savol qaytar (ro'yxat uzunligi 1 bo'lsin)\n"
+            "Natijani faqat JSON ko'rinishida qaytar: {\"quiz\": [...]}.\n"
+            "Har element: {\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"correct_index\": 0, \"explanation\": \"...\"}\n"
+            "Eslatma: Agar rasmda to'g'ri javob aniq ko'rinmasa, eng mantiqiy javobni tanla."
+        )
+
+        try:
+            response = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=self.openai_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "RASM:"},
+                                {"type": "image_url", "image_url": {"url": data_url}},
+                            ],
+                        },
+                    ],
+                    temperature=0.2,
+                    response_format={"type": "json_object"},
+                ),
+                timeout=total_timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            raise AIServiceError(
+                _format_deadline_error("timeout", provider="openai", model_name=str(self.openai_model), timeout_sec=int(total_timeout))
+            ) from exc
+        except Exception as exc:
+            msg = str(exc)
+            low = msg.lower()
+            if "invalid_api_key" in low or "incorrect api key" in low or "error code: 401" in low:
+                raise AIServiceError("OpenAI 401: API key noto'g'ri yoki bekor qilingan.") from exc
+            if "image" in low and ("not supported" in low or "unsupported" in low):
+                raise AIServiceError(
+                    "OpenAI modeli rasm (vision) qabul qilmayapti.\n"
+                    "Yechim: `.env` da `OPENAI_MODEL=gpt-4o-mini` (yoki vision'li boshqa model) qo'ying."
+                ) from exc
+            if _looks_like_deadline_exceeded(msg):
+                raise AIServiceError(
+                    _format_deadline_error(msg, provider="openai", model_name=str(self.openai_model), timeout_sec=int(total_timeout))
+                ) from exc
+            raise
+
+        content = response.choices[0].message.content or ""
+        data = _load_json_from_text(content)
+        questions = _normalize_quiz(data, shuffle_options=shuffle_options)
+        if not questions:
+            raise AIServiceError("AI did not return any valid questions from image")
+        return questions[0]
 
     async def _generate_gemini_image(self, image_path: str, *, lang_instruction: str, shuffle_options: bool = True) -> Dict[str, Any]:
         try:

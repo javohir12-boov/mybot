@@ -231,6 +231,22 @@ class SecurityMiddleware(BaseMiddleware):
         except Exception:
             pass
 
+    def _is_ui_language_event(self, event: Any) -> bool:
+        """Allow language selection without mandatory channel subscription."""
+        try:
+            if isinstance(event, types.CallbackQuery):
+                data = str(getattr(event, "data", "") or "")
+                return data == "menu_ui_language" or data.startswith("set_ui_lang:")
+            if isinstance(event, types.Message):
+                text = str(getattr(event, "text", "") or "").strip()
+                if not text.startswith("/"):
+                    return False
+                cmd = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
+                return cmd in {"/start", "/til", "/lang"}
+        except Exception:
+            return False
+        return False
+
     async def __call__(
         self,
         handler: Callable[[Any, Dict[str, Any]], Awaitable[Any]],
@@ -253,7 +269,8 @@ class SecurityMiddleware(BaseMiddleware):
 
         # Mandatory channel subscription gate (optional).
         is_check_sub = isinstance(event, types.CallbackQuery) and str(getattr(event, "data", "") or "") == "check_sub"
-        if str(self.required_channel or "").strip():
+        is_ui_lang = self._is_ui_language_event(event)
+        if (not is_ui_lang) and str(self.required_channel or "").strip():
             bot = None
             try:
                 bot = data.get("bot") or getattr(event, "bot", None)

@@ -55,6 +55,7 @@ from services.database import (
     set_user_ui_lang,
     upsert_manual_quiz_draft,
     update_quiz_meta,
+    update_question_correct_answer,
 )
 
 router = Router()
@@ -1205,7 +1206,10 @@ def _kb_main_menu(ui_lang: str, *, user_id: int = 0, show_start_lang: bool = Fal
 
 
 
-async def _open_upload_flow(message: types.Message, state: FSMContext, *, ui_lang: str) -> None:
+async def _open_upload_flow(message: types.Message, state: FSMContext, *, ui_lang: str, user_id: int = 0) -> None:
+    # If the user was building a manual quiz and switched to another flow, persist the draft first.
+    if int(user_id or 0):
+        await _persist_manual_draft(state, user_id=int(user_id), chat_id=int(message.chat.id))
     await state.clear()
     await state.set_state(UploadStates.await_file)
     key = "upload_hint" if AI_ENABLED else "upload_hint_noai"
@@ -1213,6 +1217,9 @@ async def _open_upload_flow(message: types.Message, state: FSMContext, *, ui_lan
 
 
 async def _open_topic_flow(message: types.Message, state: FSMContext, *, user_id: int, ui_lang: str) -> None:
+    # If the user was building a manual quiz and switched to another flow, persist the draft first.
+    if int(user_id or 0):
+        await _persist_manual_draft(state, user_id=int(user_id), chat_id=int(message.chat.id))
     await state.clear()
     if not AI_ENABLED:
         await message.answer(t(ui_lang, "ai_disabled"))
@@ -1234,6 +1241,9 @@ async def _open_topic_flow(message: types.Message, state: FSMContext, *, user_id
 
 
 async def _open_manual_quiz_flow(message: types.Message, state: FSMContext, *, user_id: int, ui_lang: str) -> None:
+    # If the user was building a manual quiz and re-opened /newquiz, persist the draft first.
+    if int(user_id or 0):
+        await _persist_manual_draft(state, user_id=int(user_id), chat_id=int(message.chat.id))
     await state.clear()
     draft = await get_manual_quiz_draft(user_id=user_id)
     if draft and str(draft.get("state") or "").strip():
@@ -1251,7 +1261,7 @@ async def _resume_pending_after_sub(call: types.CallbackQuery, state: FSMContext
         return False
     ui_lang = await _get_ui_lang(call.from_user.id)
     if action == "menu_upload":
-        await _open_upload_flow(call.message, state, ui_lang=ui_lang)
+        await _open_upload_flow(call.message, state, ui_lang=ui_lang, user_id=call.from_user.id)
         return True
     if action == "menu_topic":
         await _open_topic_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang)
@@ -1378,6 +1388,9 @@ async def cmd_start_deeplink(
     state: FSMContext,
     bot: Bot,
 ) -> None:
+    # If the user was building a manual quiz, persist the draft before clearing the FSM state.
+    if message.from_user:
+        await _persist_manual_draft(state, user_id=message.from_user.id, chat_id=int(message.chat.id))
     await state.clear()
     if message.from_user:
         await get_or_create_user(
@@ -1434,13 +1447,22 @@ async def cmd_start_deeplink(
         )
         return
 
-    ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
-    start_text = get_about_text(ui_lang) + "\n\n" + _START_LANG_PROMPT
-    await message.answer(start_text, reply_markup=_kb_main_menu(ui_lang, user_id=message.from_user.id if message.from_user else 0, show_start_lang=True))
+    user_id = message.from_user.id if message.from_user else 0
+    settings = await get_or_create_user_settings(user_id=user_id) if user_id else {"ui_lang": "uz", "ui_lang_picked": True}
+    ui_lang = norm_ui_lang(str(settings.get("ui_lang") or "uz"))
+    _set_ui_lang_cache(int(user_id or 0), ui_lang)
+
+    await message.answer(
+        get_about_text(ui_lang),
+        reply_markup=_kb_main_menu(ui_lang, user_id=user_id, show_start_lang=True),
+    )
 
 
 @router.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext, bot: Bot) -> None:
+    # If the user was building a manual quiz, persist the draft before clearing the FSM state.
+    if message.from_user:
+        await _persist_manual_draft(state, user_id=message.from_user.id, chat_id=int(message.chat.id))
     await state.clear()
     if message.from_user:
         await get_or_create_user(
@@ -1449,9 +1471,15 @@ async def cmd_start(message: types.Message, state: FSMContext, bot: Bot) -> None
             username=getattr(message.from_user, "username", None),
         )
         await get_or_create_user_settings(user_id=message.from_user.id)
-    ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
-    start_text = get_about_text(ui_lang) + "\n\n" + _START_LANG_PROMPT
-    await message.answer(start_text, reply_markup=_kb_main_menu(ui_lang, user_id=message.from_user.id if message.from_user else 0, show_start_lang=True))
+    user_id = message.from_user.id if message.from_user else 0
+    settings = await get_or_create_user_settings(user_id=user_id) if user_id else {"ui_lang": "uz", "ui_lang_picked": True}
+    ui_lang = norm_ui_lang(str(settings.get("ui_lang") or "uz"))
+    _set_ui_lang_cache(int(user_id or 0), ui_lang)
+
+    await message.answer(
+        get_about_text(ui_lang),
+        reply_markup=_kb_main_menu(ui_lang, user_id=user_id, show_start_lang=True),
+    )
 
 
 @router.message(Command("menu"))
@@ -1479,7 +1507,10 @@ async def check_subscription(call: types.CallbackQuery, bot: Bot, state: FSMCont
     await call.answer(t(ui_lang, "sub_check_ok"), show_alert=False)
     resumed = await _resume_pending_after_sub(call, state)
     if call.message and not resumed:
-        await call.message.answer(get_about_text(ui_lang), reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0, show_start_lang=True))
+        await call.message.answer(
+            get_about_text(ui_lang),
+            reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0, show_start_lang=False),
+        )
 
 
 
@@ -1493,6 +1524,7 @@ async def cmd_topic(message: types.Message, state: FSMContext, bot: Bot) -> None
         ui_lang = await _get_ui_lang(message.from_user.id)
         await message.answer(t(ui_lang, "ai_disabled"))
         return
+    await _persist_manual_draft(state, user_id=message.from_user.id, chat_id=int(message.chat.id))
     await state.clear()
     ui_lang = await _get_ui_lang(message.from_user.id)
     session_id = uuid.uuid4().hex
@@ -1699,8 +1731,73 @@ def _kb_quiz_edit_menu(quiz_id: int, *, ui_lang: str = "uz") -> types.InlineKeyb
     kb = InlineKeyboardBuilder()
     kb.button(text=t(ui_lang, "btn_edit_title"), callback_data=f"quiz_edit_title:{int(quiz_id)}")
     kb.button(text=t(ui_lang, "btn_edit_time"), callback_data=f"quiz_edit_time:{int(quiz_id)}")
+    kb.button(text=t(ui_lang, "btn_edit_answers"), callback_data=f"quiz_edit_answers:{int(quiz_id)}")
     kb.button(text=t(ui_lang, "btn_back"), callback_data=f"quiz_edit_back:{int(quiz_id)}")
-    kb.adjust(2)
+    kb.adjust(2, 2)
+    return kb.as_markup()
+
+
+def _kb_quiz_edit_questions(
+    quiz_id: int,
+    *,
+    questions: List[Dict[str, Any]],
+    offset: int,
+    ui_lang: str,
+    page_size: int = 20,
+) -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    offset = max(0, int(offset or 0))
+    page_size = max(5, min(30, int(page_size or 20)))
+
+    total = len(questions or [])
+    page = (questions or [])[offset : offset + page_size]
+
+    kb = InlineKeyboardBuilder()
+    num_count = 0
+    for i, q in enumerate(page, start=offset + 1):
+        qid = int(q.get("question_id") or 0)
+        if not qid:
+            continue
+        kb.button(text=str(i), callback_data=f"quiz_edit_answer_q:{int(quiz_id)}:{qid}:{offset}")
+        num_count += 1
+
+    nav_count = 0
+    if offset > 0:
+        prev_off = max(0, offset - page_size)
+        kb.button(text=t(ui_lang, "btn_prev_page"), callback_data=f"quiz_edit_answers:{int(quiz_id)}:{prev_off}")
+        nav_count += 1
+    if (offset + page_size) < total:
+        next_off = offset + page_size
+        kb.button(text=t(ui_lang, "btn_next_page"), callback_data=f"quiz_edit_answers:{int(quiz_id)}:{next_off}")
+        nav_count += 1
+
+    kb.button(text=t(ui_lang, "btn_back"), callback_data=f"quiz_edit:{int(quiz_id)}")
+
+    sizes: List[int] = []
+    rem = num_count
+    while rem > 0:
+        sizes.append(min(5, rem))
+        rem -= 5
+    if nav_count:
+        sizes.append(nav_count)
+    sizes.append(1)
+    kb.adjust(*sizes)
+    return kb.as_markup()
+
+
+def _kb_quiz_edit_correct_answer(
+    quiz_id: int,
+    *,
+    question_id: int,
+    offset: int,
+    ui_lang: str,
+) -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    for i in range(4):
+        kb.button(text=str(i + 1), callback_data=f"quiz_edit_answer_set:{int(quiz_id)}:{int(question_id)}:{i}:{int(offset)}")
+    kb.button(text=t(ui_lang, "btn_back"), callback_data=f"quiz_edit_answers:{int(quiz_id)}:{int(offset)}")
+    kb.adjust(2, 2, 1)
     return kb.as_markup()
 
 
@@ -1808,6 +1905,188 @@ async def quiz_edit_menu(call: types.CallbackQuery, bot: Bot, state: FSMContext)
         await call.message.answer(
             t(ui_lang, "edit_menu", title=title, count=count, sec=sec, id=int(quiz_id)),
             reply_markup=_kb_quiz_edit_menu(quiz_id, ui_lang=ui_lang),
+        )
+
+
+@router.callback_query(F.data.startswith("quiz_edit_answers:"))
+async def quiz_edit_answers(call: types.CallbackQuery, bot: Bot, state: FSMContext) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    parts = str(call.data or "").split(":")
+    if len(parts) < 2:
+        await call.answer(t(ui_lang, "error_short"), show_alert=True)
+        return
+
+    try:
+        quiz_id = int(parts[1])
+    except Exception:
+        await call.answer(t(ui_lang, "error_short"), show_alert=True)
+        return
+
+    offset = 0
+    if len(parts) >= 3:
+        try:
+            offset = int(parts[2])
+        except Exception:
+            offset = 0
+
+    summary = await get_quiz_summary(quiz_id)
+    if not summary:
+        await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
+        return
+    if int(summary.get("creator_id") or 0) != int(call.from_user.id):
+        await call.answer(t(ui_lang, "edit_creator_only"), show_alert=True)
+        return
+
+    quiz = await get_quiz_with_questions(quiz_id)
+    if not quiz:
+        await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
+        return
+
+    questions = quiz.get("questions") or []
+    if not isinstance(questions, list) or not questions:
+        await call.answer(t(ui_lang, "quiz_no_questions"), show_alert=True)
+        return
+
+    await call.answer()
+    if call.message:
+        await call.message.answer(
+            t(ui_lang, "edit_answers_choose_question", count=len(questions)),
+            reply_markup=_kb_quiz_edit_questions(quiz_id, questions=questions, offset=offset, ui_lang=ui_lang),
+        )
+
+
+@router.callback_query(F.data.startswith("quiz_edit_answer_q:"))
+async def quiz_edit_answer_pick(call: types.CallbackQuery, bot: Bot) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    parts = str(call.data or "").split(":")
+    if len(parts) < 4:
+        await call.answer(t(ui_lang, "error_short"), show_alert=True)
+        return
+
+    try:
+        quiz_id = int(parts[1])
+        question_id = int(parts[2])
+        offset = int(parts[3])
+    except Exception:
+        await call.answer(t(ui_lang, "error_short"), show_alert=True)
+        return
+
+    summary = await get_quiz_summary(quiz_id)
+    if not summary:
+        await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
+        return
+    if int(summary.get("creator_id") or 0) != int(call.from_user.id):
+        await call.answer(t(ui_lang, "edit_creator_only"), show_alert=True)
+        return
+
+    quiz = await get_quiz_with_questions(quiz_id)
+    if not quiz:
+        await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
+        return
+
+    questions = quiz.get("questions") or []
+    if not isinstance(questions, list) or not questions:
+        await call.answer(t(ui_lang, "quiz_no_questions"), show_alert=True)
+        return
+
+    picked: Optional[Dict[str, Any]] = None
+    for q in questions:
+        if int(q.get("question_id") or 0) == int(question_id):
+            picked = q
+            break
+
+    if not picked:
+        await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
+        return
+
+    opts = picked.get("options") or []
+    if not isinstance(opts, list):
+        opts = []
+    opts = [str(o) for o in opts][:4]
+
+    lines: List[str] = []
+    qtext = str(picked.get("question") or "").strip()
+    if qtext:
+        lines.append(qtext)
+    if opts:
+        for i, o in enumerate(opts, start=1):
+            lines.append(f"{i}) {o}")
+    lines.append("")
+    lines.append(t(ui_lang, "edit_answers_choose_correct"))
+
+    await call.answer()
+    if call.message:
+        await call.message.answer(
+            "\n".join(lines).strip(),
+            reply_markup=_kb_quiz_edit_correct_answer(quiz_id, question_id=question_id, offset=offset, ui_lang=ui_lang),
+        )
+
+
+@router.callback_query(F.data.startswith("quiz_edit_answer_set:"))
+async def quiz_edit_answer_set(call: types.CallbackQuery, bot: Bot) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    parts = str(call.data or "").split(":")
+    if len(parts) < 5:
+        await call.answer(t(ui_lang, "error_short"), show_alert=True)
+        return
+
+    try:
+        quiz_id = int(parts[1])
+        question_id = int(parts[2])
+        correct_index = int(parts[3])
+        offset = int(parts[4])
+    except Exception:
+        await call.answer(t(ui_lang, "error_short"), show_alert=True)
+        return
+
+    summary = await get_quiz_summary(quiz_id)
+    if not summary:
+        await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
+        return
+    if int(summary.get("creator_id") or 0) != int(call.from_user.id):
+        await call.answer(t(ui_lang, "edit_creator_only"), show_alert=True)
+        return
+
+    ok = await update_question_correct_answer(quiz_id=quiz_id, question_id=question_id, correct_index=correct_index)
+    if not ok:
+        await call.answer(t(ui_lang, "error_short"), show_alert=True)
+        return
+
+    await call.answer(t(ui_lang, "edit_answers_updated"), show_alert=False)
+
+    # Re-open the same question view for quick verification.
+    quiz = await get_quiz_with_questions(quiz_id)
+    if not quiz:
+        return
+    questions = quiz.get("questions") or []
+    if not isinstance(questions, list) or not questions:
+        return
+    picked: Optional[Dict[str, Any]] = None
+    for q in questions:
+        if int(q.get("question_id") or 0) == int(question_id):
+            picked = q
+            break
+    if not picked:
+        return
+
+    opts = picked.get("options") or []
+    if not isinstance(opts, list):
+        opts = []
+    opts = [str(o) for o in opts][:4]
+    lines: List[str] = []
+    qtext = str(picked.get("question") or "").strip()
+    if qtext:
+        lines.append(qtext)
+    if opts:
+        for i, o in enumerate(opts, start=1):
+            lines.append(f"{i}) {o}")
+    lines.append("")
+    lines.append(t(ui_lang, "edit_answers_choose_correct"))
+
+    if call.message:
+        await call.message.answer(
+            "\n".join(lines).strip(),
+            reply_markup=_kb_quiz_edit_correct_answer(quiz_id, question_id=question_id, offset=offset, ui_lang=ui_lang),
         )
 
 
@@ -2066,11 +2345,25 @@ async def set_ui_lang(call: types.CallbackQuery) -> None:
     if ui_lang not in {"uz", "ru", "en", "de", "tr", "kk", "ar", "zh", "ko"}:
         await call.answer(t("uz", "invalid_button"), show_alert=True)
         return
+
+    was_picked = True
+    try:
+        prev = await get_or_create_user_settings(user_id=call.from_user.id)
+        was_picked = bool(prev.get("ui_lang_picked"))
+    except Exception:
+        was_picked = True
+
     await set_user_ui_lang(call.from_user.id, ui_lang)
     _set_ui_lang_cache(call.from_user.id, ui_lang)
     await call.answer(t(ui_lang, "saved_short"))
     if call.message:
-        await call.message.answer(t(ui_lang, "ui_lang_saved", lang_name=lang_name(ui_lang)), reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0))
+        if not was_picked:
+            await call.message.answer(get_about_text(ui_lang), reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0))
+        else:
+            await call.message.answer(
+                t(ui_lang, "ui_lang_saved", lang_name=lang_name(ui_lang)),
+                reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0),
+            )
 
 
 @router.callback_query(F.data.startswith("set_lang:"))
@@ -2096,7 +2389,7 @@ async def menu_upload(call: types.CallbackQuery, state: FSMContext, bot: Bot) ->
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
     if call.message:
-        await _open_upload_flow(call.message, state, ui_lang=ui_lang)
+        await _open_upload_flow(call.message, state, ui_lang=ui_lang, user_id=call.from_user.id)
 
 
 @router.callback_query(F.data == "menu_topic")
@@ -3169,33 +3462,14 @@ async def manual_draft_restart(call: types.CallbackQuery, state: FSMContext) -> 
 @router.callback_query(F.data == "m_draft:resume")
 async def manual_draft_resume(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()
-    draft = await get_manual_quiz_draft(user_id=call.from_user.id)
     ui_lang = await _get_ui_lang(call.from_user.id)
-
-    if not draft or not str(draft.get("state") or "").strip():
-        await state.clear()
-        await state.update_data(m_ui_lang=ui_lang)
-        await state.set_state(ManualQuizStates.title)
-        if call.message:
-            await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
-            await call.message.answer(t(ui_lang, "manual_title_prompt"))
-        return
-
-    data = draft.get("data") or {}
-    if not isinstance(data, dict):
-        data = {}
+    data = await _restore_manual_draft_if_needed(state, user_id=call.from_user.id, ui_lang=ui_lang)
+    st = await state.get_state()
     ui_lang = norm_ui_lang(str(data.get("m_ui_lang") or ui_lang))
-
-    st = str(draft.get("state") or "").strip()
-    if not st.startswith("ManualQuizStates:"):
-        st = ManualQuizStates.title.state
-
-    await state.clear()
-    await state.update_data(**data, m_ui_lang=ui_lang)
-    await state.set_state(st)
+    st = str(st or ManualQuizStates.title.state)
     if call.message:
         await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
-        prompt, markup = _manual_prompt_for_state(ui_lang=ui_lang, state_str=st, data=data)
+        prompt, markup = _manual_prompt_for_state(ui_lang=ui_lang, state_str=st, data=await state.get_data())
         await call.message.answer(prompt, reply_markup=markup)
 
 @router.message(ManualQuizStates.title)
@@ -5227,7 +5501,7 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                         provider = ai_service._pick_provider()
                     except AIServiceError as exc:
                         raise
-                    if provider != "gemini":
+                    if provider not in {"openai", "gemini"}:
                         raise AIServiceError(t(ui_lang, "scan_pdf_need_gemini"))
 
                     out_dir = _DOWNLOAD_DIR / f"scan_{uuid.uuid4().hex}"
@@ -5297,7 +5571,7 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                         provider = ai_service._pick_provider()
                     except AIServiceError as exc:
                         raise
-                    if provider != "gemini":
+                    if provider not in {"openai", "gemini"}:
                         raise AIServiceError(t(ui_lang, "scan_pdf_need_gemini"))
 
                     out_dir = _DOWNLOAD_DIR / f"scan_{uuid.uuid4().hex}"
@@ -5800,7 +6074,7 @@ async def on_photo_upload(message: types.Message, bot: Bot, state: FSMContext) -
     except AIServiceError as exc:
         await message.answer(t(ui_lang, "err_ai", err=str(exc)))
         return
-    if provider != "gemini":
+    if provider not in {"openai", "gemini"}:
         await message.answer(t(ui_lang, "scan_pdf_need_gemini"))
         return
 
@@ -5892,7 +6166,7 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
 
         caption = (message.caption or "").strip()
 
-        # Image upload (.jpg/.png): handled via Gemini vision.
+        # Image upload (.jpg/.png): handled via vision (OpenAI/Gemini).
         if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
             if not AI_ENABLED:
                 await status.edit_text(t(ui_lang, "upload_hint_noai"))
@@ -5902,7 +6176,7 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
             except AIServiceError as exc:
                 await status.edit_text(t(ui_lang, "err_ai", err=str(exc)))
                 return
-            if provider != "gemini":
+            if provider not in {"openai", "gemini"}:
                 await status.edit_text(t(ui_lang, "scan_pdf_need_gemini"))
                 return
 

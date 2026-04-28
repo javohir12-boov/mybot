@@ -2,6 +2,7 @@
 import random
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -222,6 +223,45 @@ def _compact_ws(value: str) -> str:
 def _parse_quiz_table_rows(text: str) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    header_words = (
+        "savol",
+        "вопрос",
+        "question",
+        "to'g'ri javob",
+        "правильный ответ",
+        "correct answer",
+        "no'to'g'ri javob",
+        "noto'g'ri javob",
+        "неправильный ответ",
+        "wrong answer",
+    )
+
+    def _is_header_cell(value: str) -> bool:
+        low = _compact_ws(value).lower()
+        if not low:
+            return True
+        return any(word in low for word in header_words)
+
+    def _append_row(parts: List[str]) -> None:
+        if len(parts) < 5:
+            return
+        question = _compact_ws(parts[0])
+        options = [_compact_ws(p) for p in parts[1:5] if _compact_ws(p)]
+        if not question or len(options) != 4:
+            return
+        if _is_header_cell(question):
+            return
+        if any(_is_header_cell(opt) for opt in options):
+            return
+        out.append(
+            {
+                "question": question,
+                "options": options,
+                "correct_index": 0,
+                "explanation": "",
+            }
+        )
+
     for raw in normalized.split("\n"):
         line = raw.strip()
         if not line:
@@ -232,20 +272,146 @@ def _parse_quiz_table_rows(text: str) -> List[Dict[str, Any]]:
         if len(parts) < 5:
             continue
         num = parts[0]
-        if not re.fullmatch(r"\d{1,4}", num):
+        # Variant 1: numbered rows => [num, question, correct, wrong, wrong, wrong]
+        if re.fullmatch(r"\d{1,4}", num):
+            _append_row(parts[1:6])
             continue
-        question = _compact_ws(parts[1])
-        options = [_compact_ws(p) for p in parts[2:6] if _compact_ws(p)]
-        if question and len(options) >= 4:
-            out.append(
-                {
-                    "question": question,
-                    "options": options[:4],
-                    "correct_index": 0,
-                    "explanation": "",
-                }
-            )
+
+        # Variant 2: table without explicit numbering => [question, correct, wrong, wrong, wrong]
+        _append_row(parts[:5])
     return out
+
+
+def parse_quiz_xlsx(file_path: str, *, title_fallback: str = "") -> Tuple[str, List[Dict[str, Any]]]:
+    title = (title_fallback or Path(file_path).stem or "Quiz").strip()
+    out: List[Dict[str, Any]] = []
+    header_words = (
+        "savol",
+        "вопрос",
+        "question",
+        "to'g'ri javob",
+        "правильный ответ",
+        "correct answer",
+        "noto'g'ri javob",
+        "no'to'g'ri javob",
+        "неправильный ответ",
+        "wrong answer",
+    )
+
+    def _is_header_cell(value: str) -> bool:
+        low = _compact_ws(value).lower()
+        if not low:
+            return True
+        return any(word in low for word in header_words)
+
+    def _cell_text(value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+        text = re.sub(r"\s*\n\s*", " ", text)
+        return _compact_ws(text)
+
+    def _append_row(cells: List[str]) -> None:
+        nonempty = [cell for cell in cells if cell]
+        if len(nonempty) < 5:
+            return
+        parts = nonempty[1:6] if len(nonempty) >= 6 and re.fullmatch(r"\d{1,4}", nonempty[0]) else nonempty[:5]
+        if len(parts) < 5:
+            return
+        question = _compact_ws(parts[0])
+        options = [_compact_ws(part) for part in parts[1:5] if _compact_ws(part)]
+        if not question or len(options) != 4:
+            return
+        if _is_header_cell(question):
+            return
+        if any(_is_header_cell(opt) for opt in options):
+            return
+        out.append(
+            {
+                "question": question,
+                "options": options,
+                "correct_index": 0,
+                "explanation": "",
+            }
+        )
+
+    try:
+        from openpyxl import load_workbook
+
+        wb = load_workbook(file_path, read_only=True, data_only=True)
+        try:
+            for ws in wb.worksheets:
+                for row in ws.iter_rows(values_only=True):
+                    _append_row([_cell_text(value) for value in row])
+        finally:
+            wb.close()
+        return title, out
+    except ImportError:
+        pass
+
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+    def _col_index(cell_ref: str) -> int:
+        letters = "".join(ch for ch in str(cell_ref or "") if ch.isalpha()).upper()
+        idx = 0
+        for ch in letters:
+            idx = idx * 26 + (ord(ch) - ord("A") + 1)
+        return max(0, idx - 1)
+
+    def _shared_strings(z: zipfile.ZipFile) -> List[str]:
+        try:
+            root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+        except Exception:
+            return []
+        values: List[str] = []
+        for si in root.findall("main:si", ns):
+            text_parts = [t.text or "" for t in si.findall(".//main:t", ns)]
+            values.append(_cell_text("".join(text_parts)))
+        return values
+
+    with zipfile.ZipFile(file_path) as z:
+        shared = _shared_strings(z)
+        sheet_names = sorted(
+            [name for name in z.namelist() if name.startswith("xl/worksheets/sheet") and name.endswith(".xml")]
+        )
+        for name in sheet_names:
+            try:
+                root = ET.fromstring(z.read(name))
+            except Exception:
+                continue
+            for row in root.findall(".//main:sheetData/main:row", ns):
+                values_by_col: Dict[int, str] = {}
+                max_col = -1
+                for cell in row.findall("main:c", ns):
+                    ref = cell.attrib.get("r", "")
+                    col = _col_index(ref)
+                    max_col = max(max_col, col)
+                    cell_type = cell.attrib.get("t", "")
+                    value = ""
+                    if cell_type == "inlineStr":
+                        value = "".join(t.text or "" for t in cell.findall(".//main:t", ns))
+                    else:
+                        v_node = cell.find("main:v", ns)
+                        raw = (v_node.text or "") if v_node is not None else ""
+                        if cell_type == "s":
+                            try:
+                                value = shared[int(raw)]
+                            except Exception:
+                                value = raw
+                        else:
+                            value = raw
+                    value = _cell_text(value)
+                    if value:
+                        values_by_col[col] = value
+                if max_col < 0:
+                    continue
+                row_values = [values_by_col.get(i, "") for i in range(max_col + 1)]
+                _append_row(row_values)
+
+    return title, out
 
 
 def _parse_quiz_plus_minus(text: str) -> List[Dict[str, Any]]:

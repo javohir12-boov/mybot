@@ -23,6 +23,9 @@ class AIServiceError(RuntimeError):
     pass
 
 
+FRIENDLY_TOO_MANY_QUESTIONS = "__AI_TOO_MANY_QUESTIONS__"
+
+
 def _looks_like_openai_key(key: Optional[str]) -> bool:
     k = (key or "").strip()
     return k.startswith("sk-")
@@ -156,29 +159,11 @@ def _format_deadline_error(
     model_name: str = "",
     timeout_sec: int | None = None,
 ) -> str:
-    prov = (provider or "ai").strip().lower()
-    model = (model_name or "").strip()
-    tmo = int(timeout_sec or 0)
-
-    if prov == "gemini":
-        head = f"Gemini 504: Deadline Exceeded (model: {model or 'gemini'})."
-    elif prov == "openai":
-        head = f"OpenAI timeout/504 (model: {model or 'openai'})."
-    else:
-        head = "AI 504: Deadline Exceeded."
-
-    if tmo > 0:
-        head += f" (timeout: {tmo}s)"
-
-    parts: list[str] = [head]
-    parts.append(
-        "Yechim: savol sonini kamaytiring, mavzu/sahifa tanlang yoki matnni qisqartiring va qayta urinib ko'ring."
-    )
-    parts.append(
-        "Tezroq ishlashi uchun: `.env` da `AI_MAX_TEXT_CHARS` ni kamaytiring (masalan 12000) "
-        "yoki Gemini uchun `GEMINI_MODEL=gemini-flash-lite-latest` qilib ko'ring."
-    )
-    return "\n".join(parts).strip()
+    _ = err_text
+    _ = provider
+    _ = model_name
+    _ = timeout_sec
+    return FRIENDLY_TOO_MANY_QUESTIONS
 
 
 def _language_instruction(output_language: str) -> str:
@@ -342,10 +327,12 @@ def extract_text_from_file(file_path: str) -> str:
         return _extract_text_from_docx(file_path, char_limit=char_limit)
     if suffix == ".pptx":
         return _extract_text_from_pptx(file_path, char_limit=char_limit)
+    if suffix == ".xlsx":
+        return _extract_text_from_xlsx(file_path, char_limit=char_limit)
     if suffix in {".txt", ".md"}:
         return Path(file_path).read_text(encoding="utf-8", errors="ignore")[:char_limit]
 
-    raise AIServiceError("Unsupported file type. Send .pdf, .docx, .pptx, .txt, or .md")
+    raise AIServiceError("Unsupported file type. Send .pdf, .docx, .pptx, .xlsx, .txt, or .md")
 
 
 def _extract_text_from_pdf(file_path: str, *, char_limit: int) -> str:
@@ -480,6 +467,119 @@ def _extract_text_from_pptx(file_path: str, *, char_limit: int) -> str:
                         return "\n".join(parts)
 
     return "\n".join(parts)[:char_limit]
+
+
+def _extract_text_from_xlsx(file_path: str, *, char_limit: int) -> str:
+    def _cell_text(value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+        text = re.sub(r"\s*\n\s*", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    try:
+        from openpyxl import load_workbook
+
+        lines: List[str] = []
+        total = 0
+        wb = load_workbook(file_path, read_only=True, data_only=True)
+        try:
+            for ws in wb.worksheets:
+                for row in ws.iter_rows(values_only=True):
+                    cells = [_cell_text(value) for value in row]
+                    if not any(cells):
+                        continue
+                    line = "\t".join(cells).strip()
+                    if not line:
+                        continue
+                    lines.append(line)
+                    total += len(line) + 1
+                    if total >= char_limit:
+                        return "\n".join(lines)[:char_limit]
+        finally:
+            wb.close()
+
+        return "\n".join(lines)[:char_limit]
+    except ImportError:
+        pass
+
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    ns = {
+        "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+        "rel": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        "pkg": "http://schemas.openxmlformats.org/package/2006/relationships",
+    }
+
+    def _col_index(cell_ref: str) -> int:
+        letters = "".join(ch for ch in str(cell_ref or "") if ch.isalpha()).upper()
+        idx = 0
+        for ch in letters:
+            idx = idx * 26 + (ord(ch) - ord("A") + 1)
+        return max(0, idx - 1)
+
+    def _shared_strings(z: zipfile.ZipFile) -> List[str]:
+        try:
+            root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+        except Exception:
+            return []
+        values: List[str] = []
+        for si in root.findall("main:si", ns):
+            text_parts = [t.text or "" for t in si.findall(".//main:t", ns)]
+            values.append(_cell_text("".join(text_parts)))
+        return values
+
+    lines: List[str] = []
+    total = 0
+    with zipfile.ZipFile(file_path) as z:
+        shared = _shared_strings(z)
+        sheet_names = sorted(
+            [name for name in z.namelist() if name.startswith("xl/worksheets/sheet") and name.endswith(".xml")]
+        )
+        for name in sheet_names:
+            try:
+                root = ET.fromstring(z.read(name))
+            except Exception:
+                continue
+            for row in root.findall(".//main:sheetData/main:row", ns):
+                values_by_col: Dict[int, str] = {}
+                max_col = -1
+                for cell in row.findall("main:c", ns):
+                    ref = cell.attrib.get("r", "")
+                    col = _col_index(ref)
+                    max_col = max(max_col, col)
+                    cell_type = cell.attrib.get("t", "")
+                    value = ""
+                    if cell_type == "inlineStr":
+                        value = "".join(t.text or "" for t in cell.findall(".//main:t", ns))
+                    else:
+                        v_node = cell.find("main:v", ns)
+                        raw = (v_node.text or "") if v_node is not None else ""
+                        if cell_type == "s":
+                            try:
+                                value = shared[int(raw)]
+                            except Exception:
+                                value = raw
+                        else:
+                            value = raw
+                    value = _cell_text(value)
+                    if value:
+                        values_by_col[col] = value
+                if max_col < 0:
+                    continue
+                row_values = [values_by_col.get(i, "") for i in range(max_col + 1)]
+                if not any(row_values):
+                    continue
+                line = "\t".join(row_values).strip()
+                if not line:
+                    continue
+                lines.append(line)
+                total += len(line) + 1
+                if total >= char_limit:
+                    return "\n".join(lines)[:char_limit]
+
+    return "\n".join(lines)[:char_limit]
 
 
 def _load_json_from_text(text: str) -> Any:
@@ -773,12 +873,18 @@ class AIService:
 
         diff_extra = _difficulty_instruction(difficulty).strip()
 
-        # Keep prompts bounded for speed/cost, but scale up for larger requested quizzes.
+        # Keep prompts bounded for speed/cost.
+        # Large file-based OpenAI requests are especially prone to 504/timeout,
+        # so use a more conservative context window there and rely on batching.
         default_max_chars = 12000
         if question_count >= 20:
             default_max_chars = 20000
         if question_count >= 35:
             default_max_chars = 32000
+        if provider == "openai" and question_count >= 35:
+            default_max_chars = 16000
+        if provider == "openai" and question_count >= 45:
+            default_max_chars = 12000
 
         max_chars = int(os.getenv("AI_MAX_TEXT_CHARS", str(default_max_chars)))
         max_chars = max(5000, min(120000, max_chars))
@@ -809,6 +915,10 @@ class AIService:
             default_batch_size = 12
         if question_count >= 40:
             default_batch_size = 14
+        if provider == "openai" and question_count >= 25:
+            default_batch_size = 8
+        if provider == "openai" and question_count >= 40:
+            default_batch_size = 6
         batch_size = int(os.getenv("AI_BATCH_SIZE", str(default_batch_size)) or default_batch_size)
         batch_size = max(1, min(20, batch_size))
 
@@ -845,6 +955,8 @@ class AIService:
         default_budget = 90
         if question_count >= 40:
             default_budget = 120
+        if provider == "openai" and question_count >= 40:
+            default_budget = 150
         fill_budget_sec = int(os.getenv("AI_TEXT_TOTAL_BUDGET_SEC", str(default_budget)) or default_budget)
         fill_budget_sec = max(10, min(600, fill_budget_sec))
 
@@ -865,6 +977,10 @@ class AIService:
                 break
 
             parallel_default = 2 if question_count < 25 else 3
+            if provider == "openai" and question_count >= 25:
+                parallel_default = 2
+            if provider == "openai" and question_count >= 40:
+                parallel_default = 1
             parallel = int(
                 os.getenv(
                     "AI_PARALLEL_BATCHES_TEXT",
@@ -1071,6 +1187,66 @@ class AIService:
                 q = await self._generate_gemini_image(p, lang_instruction=lang_instruction, shuffle_options=shuffle_options)
             out.append(q)
         return out
+
+    async def extract_quiz_from_images(
+        self,
+        image_paths: List[str],
+        *,
+        max_questions: int,
+        output_language: str = "source",
+        shuffle_options: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Extract multiple ready-made quiz rows from image pages when possible.
+
+        Best for scanned PDFs that already contain table-form test rows.
+        Falls back to the single-question vision path if a page yields nothing.
+        """
+        provider = self._pick_provider()
+        if provider not in {"openai", "gemini"}:
+            raise AIServiceError("Rasmli savollar faqat OpenAI yoki Gemini (vision) bilan ishlaydi.")
+
+        paths = [str(p) for p in (image_paths or []) if str(p).strip()]
+        if not paths:
+            raise AIServiceError("Image list is empty")
+
+        limit_total = max(1, int(max_questions or 1))
+        lang_instruction = _language_instruction(output_language)
+
+        out: List[Dict[str, Any]] = []
+        for p in paths:
+            if len(out) >= limit_total:
+                break
+            remaining = limit_total - len(out)
+            if provider == "openai":
+                page_questions = await self._extract_openai_image_quiz(
+                    p,
+                    lang_instruction=lang_instruction,
+                    max_questions=remaining,
+                    shuffle_options=shuffle_options,
+                )
+            else:
+                page_questions = await self._extract_gemini_image_quiz(
+                    p,
+                    lang_instruction=lang_instruction,
+                    max_questions=remaining,
+                    shuffle_options=shuffle_options,
+                )
+
+            if not page_questions:
+                # Fallback: still try to get at least one usable question from the page.
+                if provider == "openai":
+                    one = await self._generate_openai_image(p, lang_instruction=lang_instruction, shuffle_options=shuffle_options)
+                else:
+                    one = await self._generate_gemini_image(p, lang_instruction=lang_instruction, shuffle_options=shuffle_options)
+                page_questions = [one]
+
+            for q in page_questions[:remaining]:
+                q["image_path"] = p
+                out.append(q)
+                if len(out) >= limit_total:
+                    break
+
+        return out[:limit_total]
 
 
     async def review_payment_receipt_text(self, receipt_text: str, *, expected_amount_uzs: int) -> Dict[str, Any]:
@@ -1811,6 +1987,93 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
             raise AIServiceError("AI did not return any valid questions from image")
         return questions[0]
 
+    async def _extract_openai_image_quiz(
+        self,
+        image_path: str,
+        *,
+        lang_instruction: str,
+        max_questions: int,
+        shuffle_options: bool = True,
+    ) -> List[Dict[str, Any]]:
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:
+            raise AIServiceError("openai not installed. Install: pip install openai") from exc
+
+        if not self.openai_api_key:
+            raise AIServiceError("OPENAI_API_KEY is not set")
+
+        p = Path(str(image_path or "").strip())
+        if not p.exists():
+            raise AIServiceError(f"Image file not found: {p}")
+
+        mime = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+        }.get(p.suffix.lower(), "image/png")
+        b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+        data_url = f"data:{mime};base64,{b64}"
+
+        client = AsyncOpenAI(api_key=self.openai_api_key)
+        timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", os.getenv("AI_REQUEST_TIMEOUT_SEC", "60")) or 60)
+        timeout_sec = max(5.0, min(600.0, timeout_sec))
+        total_timeout = float(os.getenv("OPENAI_TOTAL_TIMEOUT_SEC", "0") or 0)
+        if total_timeout <= 0:
+            total_timeout = min(180.0, timeout_sec + 20.0)
+
+        ask = max(1, min(8, int(max_questions or 1)))
+        system_prompt = (
+            "Sen rasm ichidagi tayyor testlarni aniq JSON formatga ko'chiradigan ekstraktorsan.\n"
+            f"- Til: {lang_instruction}\n"
+            f"- Ko'pi bilan {ask} ta to'liq savol qaytar.\n"
+            "- Agar rasmda jadval bo'lsa va ustunlar `Savol/Vopros`, `To'g'ri javob`, `Noto'g'ri javob...` bo'lsa, "
+            "har bir to'liq qatordan 1 ta savol ol.\n"
+            "- Bunday jadvalda birinchi javob ustuni to'g'ri javob bo'ladi, shuning uchun `correct_index=0` qil.\n"
+            "- Savol va variantlarni iloji boricha aynan ko'chir, o'ylab topma.\n"
+            "- Faqat rasmda aniq ko'rinadigan va to'liq savollarni qaytar.\n"
+            "- Har savolda 4 ta variant bo'lsin.\n"
+            "- explanation bo'sh bo'lishi mumkin.\n"
+            "Natijani faqat JSON ko'rinishida qaytar: {\"quiz\": [...]}.\n"
+            "Har element: {\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"correct_index\": 0, \"explanation\": \"\"}"
+        )
+
+        try:
+            response = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=self.openai_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Rasm ichidagi tayyor testlarni ajratib ber."},
+                                {"type": "image_url", "image_url": {"url": data_url}},
+                            ],
+                        },
+                    ],
+                    temperature=0.0,
+                    response_format={"type": "json_object"},
+                ),
+                timeout=total_timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            raise AIServiceError(
+                _format_deadline_error("timeout", provider="openai", model_name=str(self.openai_model), timeout_sec=int(total_timeout))
+            ) from exc
+        except Exception as exc:
+            msg = str(exc)
+            if _looks_like_deadline_exceeded(msg):
+                raise AIServiceError(
+                    _format_deadline_error(msg, provider="openai", model_name=str(self.openai_model), timeout_sec=int(total_timeout))
+                ) from exc
+            raise
+
+        content = response.choices[0].message.content or ""
+        data = _load_json_from_text(content)
+        return _normalize_quiz(data, shuffle_options=shuffle_options)[:ask]
+
     async def _generate_gemini_image(self, image_path: str, *, lang_instruction: str, shuffle_options: bool = True) -> Dict[str, Any]:
         try:
             import google.generativeai as genai
@@ -1925,6 +2188,84 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
         if not questions:
             raise AIServiceError("AI did not return any valid questions from image")
         return questions[0]
+
+    async def _extract_gemini_image_quiz(
+        self,
+        image_path: str,
+        *,
+        lang_instruction: str,
+        max_questions: int,
+        shuffle_options: bool = True,
+    ) -> List[Dict[str, Any]]:
+        try:
+            import google.generativeai as genai
+        except ImportError as exc:
+            raise AIServiceError(
+                "google-generativeai not installed. Install: pip install google-generativeai"
+            ) from exc
+
+        if not self.gemini_api_key:
+            raise AIServiceError("GEMINI_API_KEY is not set")
+
+        genai.configure(api_key=self.gemini_api_key)
+        model_name = (self.gemini_model or "").strip()
+        if not model_name:
+            raise AIServiceError("GEMINI_MODEL bo'sh. .env da GEMINI_MODEL=... qo'ying.")
+        if model_name.startswith("models/"):
+            model_name = model_name.split("/", 1)[1]
+
+        model = genai.GenerativeModel(model_name)
+        timeout_sec = int(os.getenv("GEMINI_TIMEOUT_SEC", os.getenv("AI_REQUEST_TIMEOUT_SEC", "60")) or 60)
+        timeout_sec = max(5, min(300, timeout_sec))
+        total_timeout = int(os.getenv("GEMINI_TOTAL_TIMEOUT_SEC", str(timeout_sec + 30)) or (timeout_sec + 30))
+        total_timeout = max(timeout_sec, min(600, total_timeout))
+        ask = max(1, min(8, int(max_questions or 1)))
+
+        prompt = (
+            "Sen rasm ichidagi tayyor testlarni aniq JSON formatga ko'chiradigan ekstraktorsan.\n"
+            f"- Til: {lang_instruction}\n"
+            f"- Ko'pi bilan {ask} ta to'liq savol qaytar.\n"
+            "- Agar rasmda jadval bo'lsa va ustunlar `Savol/Vopros`, `To'g'ri javob`, `Noto'g'ri javob...` bo'lsa, "
+            "har bir to'liq qatordan 1 ta savol ol.\n"
+            "- Bunday jadvalda birinchi javob ustuni to'g'ri javob bo'ladi, shuning uchun `correct_index=0` qil.\n"
+            "- Savol va variantlarni iloji boricha aynan ko'chir, o'ylab topma.\n"
+            "- Faqat rasmda aniq ko'rinadigan va to'liq savollarni qaytar.\n"
+            "- Har savolda 4 ta variant bo'lsin.\n"
+            "Natijani faqat JSON ko'rinishida qaytar: {\"quiz\": [...]}.\n"
+            "Har element: {\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"correct_index\": 0, \"explanation\": \"\"}"
+        )
+
+        def _call() -> str:
+            uploaded = None
+            try:
+                uploaded = genai.upload_file(image_path)
+                try:
+                    resp = model.generate_content(
+                        [prompt, uploaded],
+                        generation_config={
+                            "temperature": 0.0,
+                            "response_mime_type": "application/json",
+                        },
+                    )
+                except TypeError:
+                    resp = model.generate_content([prompt, uploaded])
+                return getattr(resp, "text", "") or ""
+            finally:
+                if uploaded is not None:
+                    try:
+                        genai.delete_file(uploaded)
+                    except Exception:
+                        pass
+
+        try:
+            raw = await asyncio.wait_for(asyncio.to_thread(_call), timeout=total_timeout)
+        except asyncio.TimeoutError as exc:
+            raise AIServiceError(
+                _format_deadline_error("timeout", provider="gemini", model_name=model_name, timeout_sec=total_timeout)
+            ) from exc
+
+        data = _load_json_from_text(raw)
+        return _normalize_quiz(data, shuffle_options=shuffle_options)[:ask]
 
 
 

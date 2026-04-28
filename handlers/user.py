@@ -1,5 +1,6 @@
 import asyncio
 import html
+import json
 import os
 import random
 import re
@@ -22,9 +23,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import AI_ENABLED, ADMIN_IDS, REQUIRED_CHANNEL, get_about_text
 from handlers.utils.i18n import lang_name, norm_ui_lang, t
-from services.ai_service import AIService, AIServiceError, extract_text_from_file
+from services.ai_service import AIService, AIServiceError, FRIENDLY_TOO_MANY_QUESTIONS, extract_text_from_file
 from services.topic_context_service import fetch_topic_context
-from services.import_service import import_format_example, parse_quiz_payload
+from services.import_service import import_format_example, parse_quiz_payload, parse_quiz_xlsx
 from services.export_service import ExportServiceError, export_quiz_to_docx, suggest_docx_filename
 from services.database import (
     QuotaExceeded,
@@ -62,7 +63,7 @@ router = Router()
 ai_service = AIService()
 
 _DOWNLOAD_DIR = Path("downloads")
-_ALLOWED_SUFFIXES = {".pdf", ".docx", ".pptx", ".txt", ".md", ".json", ".png", ".jpg", ".jpeg", ".webp"}
+_ALLOWED_SUFFIXES = {".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".md", ".json", ".png", ".jpg", ".jpeg", ".webp"}
 # Invisible placeholder keeps the Telegram message bubble compact for menu-only messages.
 # --- Quotas / limits -------------------------------------------------
 _PAYMENT_CARD_NUMBER = str(os.getenv('PAYMENT_CARD_NUMBER', '') or '').strip()
@@ -189,6 +190,13 @@ def _lang_self_name(code: str) -> str:
 
 def _lang_label_with_flag(code: str) -> str:
     return f"{_lang_flag(code)} {_lang_self_name(code)}".strip()
+
+
+def _format_ai_error_text(ui_lang: str, exc: Exception) -> str:
+    err = str(exc or "").strip()
+    if err == FRIENDLY_TOO_MANY_QUESTIONS:
+        return t(ui_lang, "err_too_many_questions")
+    return t(ui_lang, "err_ai", err=err or t(ui_lang, "error_short"))
 
 
 @dataclass
@@ -3929,22 +3937,24 @@ def _kb_counts(
     *,
     ui_lang: str = "uz",
     show_pages: bool = False,
+    show_topic_optional: bool = True,
 ) -> types.InlineKeyboardMarkup:
     max_n = int(max_n or 50)
     max_n = max(1, min(50, max_n))
     ui_lang = norm_ui_lang(ui_lang)
     kb = InlineKeyboardBuilder()
-    presets = [5, 10, 15, 20]
+    presets = [5, 10, 15, 20, 30, 40, 50]
     nums = [n for n in presets if n <= max_n]
     if max_n < 5:
         nums = list(range(1, max_n + 1))
-    elif max_n not in nums and max_n <= 20:
+    elif max_n not in nums and max_n <= 50:
         nums.append(max_n)
     for n in sorted(set(nums)):
-        kb.button(text=f"{n} ta", callback_data=f"ai_count:{session_id}:{n}")
+        kb.button(text=str(n), callback_data=f"ai_count:{session_id}:{n}")
     if show_pages:
         kb.button(text=t(ui_lang, "btn_pages_optional"), callback_data=f"ai_pages:{session_id}:count")
-    kb.button(text=t(ui_lang, "btn_topic_optional"), callback_data=f"ai_topic:{session_id}:count")
+    if show_topic_optional:
+        kb.button(text=t(ui_lang, "btn_topic_optional"), callback_data=f"ai_topic:{session_id}:count")
     kb.button(text=t(ui_lang, "btn_cancel"), callback_data=f"ai_cancel:{session_id}")
     kb.adjust(2)
     return kb.as_markup()
@@ -4608,9 +4618,16 @@ async def ai_pageset(call: types.CallbackQuery, state: FSMContext) -> None:
         prompt_key = "scan_pdf_choose_count"
         prompt_kwargs = {"pages": pages, "max_n": min(50, pages)}
     if call.message:
+        show_topic_optional = mode != "topic"
         await call.message.answer(
             t(ui_lang, prompt_key, **prompt_kwargs),
-            reply_markup=_kb_counts(session_id, max_n=max_n, ui_lang=ui_lang, show_pages=show_pages),
+            reply_markup=_kb_counts(
+                session_id,
+                max_n=max_n,
+                ui_lang=ui_lang,
+                show_pages=show_pages,
+                show_topic_optional=show_topic_optional,
+            ),
         )
 
 
@@ -4982,7 +4999,13 @@ async def ai_choose_pages_text(message: types.Message, state: FSMContext) -> Non
         prompt_kwargs = {"pages": pages, "max_n": min(50, pages)}
     await message.answer(
         t(ui_lang, prompt_key, **prompt_kwargs),
-        reply_markup=_kb_counts(session_id, max_n=max_n, ui_lang=ui_lang, show_pages=show_pages),
+        reply_markup=_kb_counts(
+            session_id,
+            max_n=max_n,
+            ui_lang=ui_lang,
+            show_pages=show_pages,
+            show_topic_optional=(mode != "topic"),
+        ),
     )
 
 
@@ -5036,7 +5059,13 @@ async def _continue_after_topic_settings(
     await state.set_state(AIQuizStates.choose_count)
     await message.answer(
         t(ui_lang, "choose_count", max_n=max_n),
-        reply_markup=_kb_counts(session_id, max_n=max_n, ui_lang=ui_lang, show_pages=show_pages),
+        reply_markup=_kb_counts(
+            session_id,
+            max_n=max_n,
+            ui_lang=ui_lang,
+            show_pages=show_pages,
+            show_topic_optional=(str(data.get("ai_mode") or "").strip().lower() != "topic"),
+        ),
     )
 
 @router.message(AIQuizStates.choose_topic)
@@ -5177,6 +5206,7 @@ async def ai_choose_count_text(message: types.Message, state: FSMContext) -> Non
         await message.answer(t(ui_lang, "session_owner_only"))
         return
 
+    session_id = str(data.get("ai_session_id") or "")
     max_n = int(data.get("ai_max_questions") or 50)
     max_n = max(1, min(50, max_n))
     text = message.text or ""
@@ -5222,26 +5252,17 @@ async def ai_choose_count_text(message: types.Message, state: FSMContext) -> Non
                 prompt_kwargs = {"pages": pages, "max_n": min(50, pages)}
             await message.answer(
                 t(ui_lang, prompt_key, **prompt_kwargs),
-                reply_markup=_kb_counts(session_id, max_n=max_n, ui_lang=ui_lang, show_pages=True),
+                reply_markup=_kb_counts(
+                    session_id,
+                    max_n=max_n,
+                    ui_lang=ui_lang,
+                    show_pages=True,
+                    show_topic_optional=(mode != "topic"),
+                ),
             )
             return
 
-    # In this step we accept ONLY the question count.
-    # Topic must be set via the "Mavzu (ixtiyoriy)" button (ai_topic callback).
-    m = re.fullmatch(r"\s*(\d{1,3})\s*(?:ta|savol|test|mat|question|questions)?\s*", text, flags=re.I)
-    if not m:
-        await message.answer(t(ui_lang, "count_invalid", max_n=max_n))
-        return
-
-    n = int(m.group(1))
-    if n < 1 or n > max_n:
-        await message.answer(t(ui_lang, "count_invalid", max_n=max_n))
-        return
-
-    await state.update_data(ai_question_count=int(n))
-
-    await state.set_state(AIQuizStates.choose_time)
-    await message.answer(t(ui_lang, "choose_time"), reply_markup=_kb_ai_time_presets(session_id, ui_lang=ui_lang))
+    await message.answer(t(ui_lang, "count_invalid", max_n=max_n))
 
 
 @router.message(AIQuizStates.choose_time)
@@ -5515,11 +5536,14 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                     if not image_paths:
                         raise AIServiceError(t(ui_lang, "scan_pdf_no_images"))
 
-                    use_paths = [str(p) for p in image_paths[:question_count] if str(p).strip()]
+                    use_paths = [str(p) for p in image_paths if str(p).strip()]
                     used_ai_generation = True
-                    questions = await ai_service.generate_quiz_from_images(use_paths, output_language=output_language, shuffle_options=generation_shuffle_options)
-                    for q, p in zip(questions, use_paths):
-                        q["image_path"] = p
+                    questions = await ai_service.extract_quiz_from_images(
+                        use_paths,
+                        max_questions=question_count,
+                        output_language=output_language,
+                        shuffle_options=generation_shuffle_options,
+                    )
                 else:
                     used_ai_generation = True
                     questions = await ai_service.generate_quiz_from_text(
@@ -5589,11 +5613,14 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                     if not image_paths:
                         raise AIServiceError(t(ui_lang, "scan_pdf_no_images"))
 
-                    use_paths = [str(p) for p in image_paths[:question_count] if str(p).strip()]
+                    use_paths = [str(p) for p in image_paths if str(p).strip()]
                     used_ai_generation = True
-                    questions = await ai_service.generate_quiz_from_images(use_paths, output_language=output_language, shuffle_options=generation_shuffle_options)
-                    for q, p in zip(questions, use_paths):
-                        q["image_path"] = p
+                    questions = await ai_service.extract_quiz_from_images(
+                        use_paths,
+                        max_questions=question_count,
+                        output_language=output_language,
+                        shuffle_options=generation_shuffle_options,
+                    )
                 else:
                     used_ai_generation = True
                     questions = await ai_service.generate_quiz_from_text(
@@ -5792,7 +5819,7 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
         anim_stop.set()
         with suppress(Exception):
             await anim_task
-        await msg.edit_text(t(ui_lang, "err_ai", err=str(exc)))
+        await msg.edit_text(_format_ai_error_text(ui_lang, exc))
     except Exception as exc:
         if reservation and quiz_id is None:
             await refund_user_quota(reservation)
@@ -6072,7 +6099,7 @@ async def on_photo_upload(message: types.Message, bot: Bot, state: FSMContext) -
     try:
         provider = ai_service._pick_provider()
     except AIServiceError as exc:
-        await message.answer(t(ui_lang, "err_ai", err=str(exc)))
+        await message.answer(_format_ai_error_text(ui_lang, exc))
         return
     if provider not in {"openai", "gemini"}:
         await message.answer(t(ui_lang, "scan_pdf_need_gemini"))
@@ -6174,7 +6201,7 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
             try:
                 provider = ai_service._pick_provider()
             except AIServiceError as exc:
-                await status.edit_text(t(ui_lang, "err_ai", err=str(exc)))
+                await status.edit_text(_format_ai_error_text(ui_lang, exc))
                 return
             if provider not in {"openai", "gemini"}:
                 await status.edit_text(t(ui_lang, "scan_pdf_need_gemini"))
@@ -6196,6 +6223,54 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
                 ai_question_count=1,
             )
             cleanup_local = False
+            await state.set_state(AIQuizStates.choose_time)
+            await status.edit_text(t(ui_lang, "choose_time"), reply_markup=_kb_ai_time_presets(session_id, ui_lang=ui_lang))
+            return
+
+        if suffix == ".xlsx":
+            title = Path(file_name).stem
+            open_period = 30
+
+            if caption:
+                for line in caption.splitlines():
+                    m = re.match(r"(?is)^\s*(?:title|nom)\s*:\s*(.+)$", line.strip())
+                    if m and (m.group(1) or "").strip():
+                        title = (m.group(1) or "").strip()[:120]
+                        break
+
+                m = re.search(r"(?i)\b(?:time|sec|sek|sekund|soniya)\s*[:\-]\s*(\d{1,3})\b", caption)
+                if m and m.group(1).isdigit():
+                    open_period = int(m.group(1))
+                else:
+                    m = _TIME_HINT_RE.search(caption)
+                    if m and m.group(1).isdigit():
+                        open_period = int(m.group(1))
+                open_period = max(5, min(600, int(open_period or 30)))
+
+            await status.edit_text(t(ui_lang, "extracting_text"))
+            parsed_title, ready_questions = await asyncio.to_thread(parse_quiz_xlsx, str(local_path), title_fallback=title)
+            if not ready_questions:
+                raise AIServiceError(t(ui_lang, "import_failed"))
+
+            raw = json.dumps({"title": parsed_title or title, "quiz": ready_questions}, ensure_ascii=False)
+            session_id = uuid.uuid4().hex
+            await state.update_data(
+                ai_session_id=session_id,
+                ai_mode="file",
+                ai_difficulty="",
+                ai_ui_lang=ui_lang,
+                ai_text=raw,
+                ai_title=(parsed_title or title)[:120],
+                ai_open_period=open_period,
+                ai_chat_id=message.chat.id,
+                ai_chat_type=message.chat.type,
+                ai_user_id=message.from_user.id if message.from_user else 0,
+                ai_pages_total=1,
+                ai_pages_return="count",
+                ai_pages_required=False,
+                ai_import_only=True,
+                ai_question_count=len(ready_questions),
+            )
             await state.set_state(AIQuizStates.choose_time)
             await status.edit_text(t(ui_lang, "choose_time"), reply_markup=_kb_ai_time_presets(session_id, ui_lang=ui_lang))
             return
@@ -6324,7 +6399,7 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
         )
 
     except AIServiceError as exc:
-        await status.edit_text(t(ui_lang, "err_ai", err=str(exc)))
+        await status.edit_text(_format_ai_error_text(ui_lang, exc))
     except Exception as exc:
         await status.edit_text(t(ui_lang, "err_unexpected", err=str(exc)))
     finally:

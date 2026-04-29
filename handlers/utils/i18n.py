@@ -108,7 +108,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         'btn_translate': 'Tarjima qilish',
         'ai_disabled': "AI funksiyalar o'chirilgan. (BOT_MODE=noai)",
         'choose_count': "Savol sonini tugmalardan tanlang.",
-        'choose_time': 'Har savol uchun nechchi sekund? 20/30/40/50 ni bosing yoki son yuboring (5..600). Misol: 30',
+        'choose_time': 'Har savol uchun nechchi sekund? 20/30/40/50/60/70 tugmalaridan birini bosing.',
         'need_translation': 'Tarjima kerakmi?',
         'shuffle_prompt_ai': 'Aralashtirish turini tanlang:',
         'shuffle_prompt_manual': 'Test uchun aralashtirish turini tanlang:',
@@ -141,7 +141,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         'choose_one_sec': 'Iltimos bitta sekund tanlang: {options}',
         'current_topic': 'Hozirgi mavzu: {topic}',
         'count_invalid': "Iltimos, savol sonini tugmalardan tanlang.",
-        'time_invalid': 'Sekundni son bilan yuboring (5..600) yoki 20/30/40/50 tugmalaridan birini bosing.',
+        'time_invalid': 'Faqat 20/30/40/50/60/70 tugmalaridan birini tanlang.',
         'accepted': 'Qabul qilindi.',
         'count_chosen': 'Savol soni: {n} ta.',
         'file_type_only': 'Faqat .pdf, .docx, .pptx, .png, .jpg, .txt, .md yoki .json fayl yuboring.',
@@ -206,7 +206,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         'edit_answers_choose_correct': "To'g'ri javob raqamini tanlang:",
         'edit_answers_updated': "Saqladim.",
         'edit_title_prompt': 'Yangi nomni yuboring:',
-        'edit_time_prompt': 'Yangi vaqtni yuboring yoki 20/30/40/50 sekund tugmalaridan birini tanlang (5..600):',
+        'edit_time_prompt': 'Yangi vaqtni 20/30/40/50/60/70 sekund tugmalaridan tanlang:',
         'edit_saved': 'Saqladim.',
         'edit_creator_only': 'Tahrirlash faqat test egasiga mumkin.',
         'choose_difficulty': 'Qiyinlik darajasini tanlang:',
@@ -563,7 +563,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         'btn_translate': 'Translate',
         'ai_disabled': 'AI features are disabled. (BOT_MODE=noai)',
         'choose_count': 'Choose the question count using the buttons.',
-        'choose_time': 'Seconds per question? Tap 20/30/40/50 or send a number (5..600). Example: 30',
+        'choose_time': 'Seconds per question? Tap one of the 20/30/40/50/60/70 buttons.',
         'need_translation': 'Need translation?',
         'shuffle_prompt_ai': 'Choose the shuffle mode:',
         'shuffle_prompt_manual': 'Choose the shuffle mode for this quiz:',
@@ -596,7 +596,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         'choose_one_sec': 'Please choose a single seconds value: {options}',
         'current_topic': 'Current topic: {topic}',
         'count_invalid': 'Please choose the question count using the buttons.',
-        'time_invalid': 'Send seconds as a number (5..600) or tap one of the 20/30/40/50 buttons.',
+        'time_invalid': 'Please choose only one of the 20/30/40/50/60/70 buttons.',
         'accepted': 'Accepted.',
         'count_chosen': 'Question count: {n}.',
         'file_type_only': 'Only .pdf, .docx, .pptx, .png, .jpg, .txt, .md or .json files are supported.',
@@ -661,7 +661,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
         'edit_answers_choose_correct': 'Choose the correct answer number:',
         'edit_answers_updated': 'Saved.',
         'edit_title_prompt': 'Send the new title:',
-        'edit_time_prompt': 'Send the new time or choose 20/30/40/50 seconds (5..600):',
+        'edit_time_prompt': 'Choose the new time using 20/30/40/50/60/70 buttons:',
         'edit_saved': 'Saved.',
         'edit_creator_only': 'Only the quiz creator can edit this quiz.',
         'choose_difficulty': 'Choose difficulty:',
@@ -796,7 +796,7 @@ _STRING_OVERRIDES: Dict[str, Dict[str, str]] = {
     },
     "de": {
         "choose_count": "Wählen Sie die Anzahl der Fragen über die Schaltflächen.",
-        "choose_time": "Wie viele Sekunden pro Frage? Tippen Sie 20/30/40/50 oder senden Sie eine Zahl (5..600).",
+        "choose_time": "Wie viele Sekunden pro Frage? Tippen Sie eine der Schaltfl?chen 20/30/40/50/60/70.",
         "need_translation": "Übersetzung nötig?",
         "shuffle_prompt_manual": "Wählen Sie den Mischmodus für diesen Test:",
         "btn_shuffle_questions": "Nur Fragen",
@@ -809,7 +809,7 @@ _STRING_OVERRIDES: Dict[str, Dict[str, str]] = {
         "session_missing": "Sitzung nicht gefunden. Starten Sie erneut über /menu.",
         "session_owner_only": "Nur der Sitzungsinhaber kann auswählen.",
         "count_invalid": "Bitte wählen Sie die Anzahl der Fragen über die Schaltflächen.",
-        "time_invalid": "Senden Sie die Sekunden als Zahl (5..600) oder tippen Sie 20/30/40/50.",
+        "time_invalid": "Bitte w?hlen Sie nur eine der Schaltfl?chen 20/30/40/50/60/70.",
         "accepted": "Übernommen.",
         "count_chosen": "Fragenzahl: {n}.",
         "invalid_button": "Ungültige Schaltfläche.",
@@ -1224,11 +1224,63 @@ _FILE_AND_ERROR_OVERRIDES: Dict[str, Dict[str, str]] = {
 }
 
 
+_TIME_BUTTON_ONLY_OVERRIDES: Dict[str, Dict[str, str]] = {
+    "uz": {
+        "choose_time": "Har savol uchun nechchi sekund? 20/30/40/50/60/70 tugmalaridan birini bosing.",
+        "time_invalid": "Faqat 20/30/40/50/60/70 tugmalaridan birini tanlang.",
+        "edit_time_prompt": "Yangi vaqtni 20/30/40/50/60/70 sekund tugmalaridan tanlang:",
+    },
+    "ru": {
+        "choose_time": "??????? ?????? ?? ??????? ??????? ???? ?? ?????? 20/30/40/50/60/70.",
+        "time_invalid": "???????? ?????? ???? ?? ?????? 20/30/40/50/60/70.",
+        "edit_time_prompt": "???????? ????? ????? ???????? 20/30/40/50/60/70:",
+    },
+    "en": {
+        "choose_time": "Seconds per question? Tap one of the 20/30/40/50/60/70 buttons.",
+        "time_invalid": "Please choose only one of the 20/30/40/50/60/70 buttons.",
+        "edit_time_prompt": "Choose the new time using 20/30/40/50/60/70 buttons:",
+    },
+    "de": {
+        "choose_time": "Wie viele Sekunden pro Frage? Tippen Sie eine der Schaltfl?chen 20/30/40/50/60/70.",
+        "time_invalid": "Bitte w?hlen Sie nur eine der Schaltfl?chen 20/30/40/50/60/70.",
+        "edit_time_prompt": "W?hlen Sie die neue Zeit mit den Schaltfl?chen 20/30/40/50/60/70:",
+    },
+    "tr": {
+        "choose_time": "Her soru i?in ka? saniye? 20/30/40/50/60/70 d??melerinden birini se?in.",
+        "time_invalid": "L?tfen yaln?zca 20/30/40/50/60/70 d??melerinden birini se?in.",
+        "edit_time_prompt": "Yeni s?reyi 20/30/40/50/60/70 d??meleriyle se?in:",
+    },
+    "kk": {
+        "choose_time": "?? ??????? ???? ??????? 20/30/40/50/60/70 ???????????? ????? ????????.",
+        "time_invalid": "??? 20/30/40/50/60/70 ???????????? ????? ????????.",
+        "edit_time_prompt": "???? ??????? 20/30/40/50/60/70 ???????????? ????????:",
+    },
+    "ar": {
+        "choose_time": "?? ????? ??? ????? ???? ??? ????? 20/30/40/50/60/70.",
+        "time_invalid": "???? ?????? ??? ????? 20/30/40/50/60/70 ???.",
+        "edit_time_prompt": "???? ????? ?????? ??? ????? 20/30/40/50/60/70:",
+    },
+    "zh": {
+        "choose_time": "?????????? 20/30/40/50/60/70 ?????",
+        "time_invalid": "???? 20/30/40/50/60/70 ?????",
+        "edit_time_prompt": "??? 20/30/40/50/60/70 ?????????",
+    },
+    "ko": {
+        "choose_time": "??? ? ?? ???? 20/30/40/50/60/70 ?? ? ??? ????.",
+        "time_invalid": "20/30/40/50/60/70 ?? ? ??? ??? ???.",
+        "edit_time_prompt": "20/30/40/50/60/70 ???? ? ??? ?????:",
+    },
+}
+
+
 def _apply_string_overrides() -> None:
     for code, data in _STRING_OVERRIDES.items():
         current = _STRINGS.setdefault(code, {})
         current.update(data)
     for code, data in _FILE_AND_ERROR_OVERRIDES.items():
+        current = _STRINGS.setdefault(code, {})
+        current.update(data)
+    for code, data in _TIME_BUTTON_ONLY_OVERRIDES.items():
         current = _STRINGS.setdefault(code, {})
         current.update(data)
 

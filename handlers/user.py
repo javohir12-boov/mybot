@@ -805,7 +805,7 @@ def _kb_quiz_share(
         kb.button(text=t(ui_lang, "btn_edit_quiz"), callback_data=f"quiz_edit:{quiz_id}")
         kb.button(text=t(ui_lang, "btn_export_docx"), callback_data=f"quiz_export:{quiz_id}")
 
-    kb.adjust(2)
+    kb.adjust(2, 2, 2)
     return kb.as_markup()
 
 
@@ -1805,7 +1805,7 @@ def _kb_quiz_edit_correct_answer(
     for i in range(4):
         kb.button(text=str(i + 1), callback_data=f"quiz_edit_answer_set:{int(quiz_id)}:{int(question_id)}:{i}:{int(offset)}")
     kb.button(text=t(ui_lang, "btn_back"), callback_data=f"quiz_edit_answers:{int(quiz_id)}:{int(offset)}")
-    kb.adjust(2, 2, 1)
+    kb.adjust(2, 2, 2, 1)
     return kb.as_markup()
 
 
@@ -2240,10 +2240,8 @@ async def quiz_edit_time_apply(message: types.Message, state: FSMContext, bot: B
     data = await state.get_data()
     ui_lang = norm_ui_lang(str(data.get("e_ui_lang") or "")) or await _get_ui_lang(message.from_user.id)
     quiz_id = int(data.get("e_quiz_id") or 0)
-    sec = _first_int(message.text or "")
-    if sec is None or sec < 5 or sec > 600:
-        await message.answer(t(ui_lang, "time_invalid"), reply_markup=_kb_quiz_edit_time_presets(quiz_id, ui_lang=ui_lang))
-        return
+    await message.answer(t(ui_lang, "time_invalid"), reply_markup=_kb_quiz_edit_time_presets(quiz_id, ui_lang=ui_lang))
+    return
 
     summary = await get_quiz_summary(quiz_id)
     if not summary:
@@ -3527,14 +3525,8 @@ async def manual_open_period(message: types.Message, state: FSMContext) -> None:
     ui_lang = norm_ui_lang(str(data.get("m_ui_lang") or ""))
     if not data.get("m_ui_lang"):
         ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
-    sec = _first_int(message.text or "")
-    if sec is None or sec < 5 or sec > 600:
-        await message.answer(t(ui_lang, "time_invalid"), reply_markup=_kb_manual_time_presets(ui_lang=ui_lang))
-        return
-    await state.update_data(m_open_period=int(sec))
-    await state.set_state(ManualQuizStates.choose_shuffle)
-    await _persist_manual_draft(state, user_id=message.from_user.id if message.from_user else 0, chat_id=message.chat.id)
-    await message.answer(t(ui_lang, "shuffle_prompt_manual"), reply_markup=_kb_manual_shuffle(ui_lang=ui_lang))
+    await message.answer(t(ui_lang, "time_invalid"), reply_markup=_kb_manual_time_presets(ui_lang=ui_lang))
+    return
 
 
 @router.callback_query(F.data.startswith("m_shuffle:"))
@@ -4019,7 +4011,7 @@ def _kb_difficulty(session_id: str, *, ui_lang: str = "uz") -> types.InlineKeybo
     return kb.as_markup()
 
 
-_TIME_PRESET_VALUES = (20, 30, 40, 50)
+_TIME_PRESET_VALUES = (20, 30, 40, 50, 60, 70)
 
 
 def _kb_manual_time_presets(*, ui_lang: str = "uz") -> types.InlineKeyboardMarkup:
@@ -4037,7 +4029,7 @@ def _kb_ai_time_presets(session_id: str, *, ui_lang: str = "uz") -> types.Inline
     for sec in _TIME_PRESET_VALUES:
         kb.button(text=f"{sec} s", callback_data=f"ai_time:{session_id}:{sec}")
     kb.button(text=t(ui_lang, "btn_cancel"), callback_data=f"ai_cancel:{session_id}")
-    kb.adjust(2, 2, 1)
+    kb.adjust(2, 2, 2, 1)
     return kb.as_markup()
 
 
@@ -4048,7 +4040,7 @@ def _kb_quiz_edit_time_presets(quiz_id: int, *, ui_lang: str = "uz") -> types.In
         kb.button(text=f"{sec} s", callback_data=f"quiz_edit_time_set:{int(quiz_id)}:{sec}")
     kb.button(text=t(ui_lang, "btn_back"), callback_data=f"quiz_edit:{int(quiz_id)}")
     kb.button(text=t(ui_lang, "btn_cancel"), callback_data=f"quiz_edit_cancel:{int(quiz_id)}")
-    kb.adjust(2, 2, 2)
+    kb.adjust(2, 2, 2, 2)
     return kb.as_markup()
 
 
@@ -4071,7 +4063,7 @@ def _kb_ai_shuffle(session_id: str, *, ui_lang: str = "uz") -> types.InlineKeybo
     kb.button(text=t(ui_lang, "btn_shuffle_both"), callback_data=f"ai_shuffle:{session_id}:both")
     kb.button(text=t(ui_lang, "btn_shuffle_keep"), callback_data=f"ai_shuffle:{session_id}:none")
     kb.button(text=t(ui_lang, "btn_cancel"), callback_data=f"ai_cancel:{session_id}")
-    kb.adjust(2, 2, 1)
+    kb.adjust(2, 2, 2, 1)
     return kb.as_markup()
 
 
@@ -5279,21 +5271,8 @@ async def ai_choose_time_text(message: types.Message, state: FSMContext) -> None
         await message.answer(t(ui_lang, "session_owner_only"))
         return
 
-    sec = _first_int(message.text or "")
-    if sec is None or sec < 5 or sec > 600:
-        await message.answer(t(ui_lang, "time_invalid"), reply_markup=_kb_ai_time_presets(str(data.get("ai_session_id") or ""), ui_lang=ui_lang))
-        return
-
-    session_id = str(data.get("ai_session_id"))
-    await state.update_data(ai_open_period=int(sec))
-    await state.set_state(AIQuizStates.choose_translate)
-    settings = await get_or_create_user_settings(user_id=message.from_user.id if message.from_user else 0)
-    default_lang = str(settings.get("default_lang") or "source")
-    show_pages = bool(data.get("ai_pages_required")) or bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
-    await message.answer(
-        t(ui_lang, "need_translation"),
-        reply_markup=_kb_translate(session_id, default_lang=default_lang, ui_lang=ui_lang, show_pages=show_pages),
-    )
+    await message.answer(t(ui_lang, "time_invalid"), reply_markup=_kb_ai_time_presets(str(data.get("ai_session_id") or ""), ui_lang=ui_lang))
+    return
 
 
 @router.callback_query(F.data.startswith("ai_count:"))
@@ -5712,6 +5691,9 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
 
         if not questions:
             raise AIServiceError("Savollar chiqmadi. Iltimos, sahifa oralig'ini o'zgartirib qayta urinib ko'ring.")
+
+        if question_count > 0 and len(questions) > int(question_count):
+            questions = questions[: int(question_count)]
 
         reservation = await reserve_user_quota(user.id, quota_kind)
 
@@ -6267,12 +6249,15 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
                 ai_user_id=message.from_user.id if message.from_user else 0,
                 ai_pages_total=1,
                 ai_pages_return="count",
-                ai_pages_required=False,
+                ai_pages_required=True,
                 ai_import_only=True,
-                ai_question_count=len(ready_questions),
+                ai_max_questions=max(1, min(50, len(ready_questions))),
             )
-            await state.set_state(AIQuizStates.choose_time)
-            await status.edit_text(t(ui_lang, "choose_time"), reply_markup=_kb_ai_time_presets(session_id, ui_lang=ui_lang))
+            await state.set_state(AIQuizStates.choose_pages)
+            await status.edit_text(
+                t(ui_lang, "pages_prompt", total=1),
+                reply_markup=_kb_page_presets(session_id, 1, ui_lang=ui_lang),
+            )
             return
 
         # Import mode: JSON is always treated as a ready quiz file.

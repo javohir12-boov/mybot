@@ -43,12 +43,15 @@ from services.database import (
     get_quiz_summary,
     get_quiz_with_questions,
     get_user_counts_summary,
+    list_broadcast_group_chat_ids,
+    list_broadcast_user_ids,
     get_user_quota_status,
     grant_user_premium,
     list_user_quizzes,
     refund_user_quota,
     get_referral_status,
     qualify_referral_if_any,
+    claim_channel_bonus,
     record_referral_invite,
     reserve_user_quota,
     set_premium_request_status,
@@ -86,9 +89,9 @@ def _max_upload_mb_for_suffix(suffix: str) -> int:
 # Premium plans (manual approval via screenshot)
 _PREMIUM_BASE_DAY_PRICE_UZS = 7890
 _PREMIUM_PLANS = {
-    '1d': {'days': 1, 'price': 7890, 'files': 2, 'topics': 6, 'disc': 12},
-    '7d': {'days': 7, 'price': 29890, 'files': 14, 'topics': 30, 'disc': 0},
-    '30d': {'days': 30, 'price': 59890, 'files': 40, 'topics': 120, 'disc': 0},
+    '1d': {'days': 1, 'price': 5000, 'files': 2, 'topics': 6, 'disc': 7},
+    '7d': {'days': 7, 'price': 29890, 'files': 14, 'topics': 30, 'disc': 25},
+    '30d': {'days': 30, 'price': 59890, 'files': 40, 'topics': 120, 'disc': 50},
 }
 
 def _plan_discount_pct(days: int, price: int) -> int:
@@ -761,6 +764,59 @@ def _telegram_share_url(url: str, text: str = "") -> str:
     return f"{base}?url={u}"
 
 
+def _bot_private_link(bot_username: str) -> str:
+    u = (bot_username or "").strip().lstrip("@")
+    if not u:
+        return ""
+    return f"https://t.me/{u}"
+
+
+def _kb_private_only(bot_username: str, *, ui_lang: str) -> Optional[types.InlineKeyboardMarkup]:
+    link = _bot_private_link(bot_username)
+    if not link:
+        return None
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(ui_lang, "btn_open_private"), url=link)
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def _send_private_only_notice(target: object, bot: Bot, *, ui_lang: str) -> None:
+    username = await _get_bot_username(bot)
+    markup = _kb_private_only(username, ui_lang=ui_lang)
+    text = t(ui_lang, "private_only_group")
+    if isinstance(target, types.CallbackQuery):
+        with suppress(Exception):
+            await target.answer()
+        if target.message:
+            await target.message.answer(text, reply_markup=markup, disable_web_page_preview=True)
+        return
+    if isinstance(target, types.Message):
+        await target.answer(text, reply_markup=markup, disable_web_page_preview=True)
+
+
+async def _qualify_referral_and_notify(bot: Bot, *, user_id: int) -> None:
+    user_id = int(user_id or 0)
+    if user_id <= 0:
+        return
+    try:
+        info = await qualify_referral_if_any(referred_user_id=user_id)
+        ref_id = int(info.get('referrer_id') or 0)
+        if ref_id <= 0 or not bool(info.get('qualified')):
+            return
+        ui_lang = await _get_ui_lang(ref_id)
+        st = await get_referral_status(ref_id)
+        try:
+            if bool(info.get('rewarded')):
+                await bot.send_message(ref_id, t(ui_lang, 'ref_rewarded', files=2, topics=1))
+            else:
+                await bot.send_message(ref_id, t(ui_lang, 'ref_progress', n=int(st.get('unrewarded_qualified') or 0), need=3))
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def _kb_quiz_share(
     bot_username: str,
     quiz_id: int,
@@ -1198,13 +1254,14 @@ def _kb_main_menu(ui_lang: str, *, user_id: int = 0, show_start_lang: bool = Fal
     kb.button(text=t(ui_lang, "btn_newquiz"), callback_data="menu_newquiz")
     kb.button(text=t(ui_lang, "btn_ui_lang"), callback_data="menu_ui_language")
     kb.button(text=t(ui_lang, "btn_premium"), callback_data="menu_premium")
+    kb.button(text=t(ui_lang, "btn_bonuses"), callback_data="menu_bonus")
     if int(user_id or 0) in set(int(x) for x in (ADMIN_IDS or [])):
         kb.button(text=t(ui_lang, "btn_admin_users"), callback_data="menu_admin_users")
 
     rows: list[int] = []
     if show_start_lang:
         rows.append(3)
-    rows.extend([2, 2, 1])
+    rows.extend([2, 2, 2])
     if int(user_id or 0) in set(int(x) for x in (ADMIN_IDS or [])):
         rows.append(1)
     kb.adjust(*rows)
@@ -1460,6 +1517,7 @@ async def cmd_start_deeplink(
     ui_lang = norm_ui_lang(str(settings.get("ui_lang") or "uz"))
     _set_ui_lang_cache(int(user_id or 0), ui_lang)
 
+    await _qualify_referral_and_notify(bot, user_id=user_id)
     await message.answer(
         get_about_text(ui_lang),
         reply_markup=_kb_main_menu(ui_lang, user_id=user_id, show_start_lang=True),
@@ -1484,6 +1542,7 @@ async def cmd_start(message: types.Message, state: FSMContext, bot: Bot) -> None
     ui_lang = norm_ui_lang(str(settings.get("ui_lang") or "uz"))
     _set_ui_lang_cache(int(user_id or 0), ui_lang)
 
+    await _qualify_referral_and_notify(bot, user_id=user_id)
     await message.answer(
         get_about_text(ui_lang),
         reply_markup=_kb_main_menu(ui_lang, user_id=user_id, show_start_lang=True),
@@ -1493,28 +1552,17 @@ async def cmd_start(message: types.Message, state: FSMContext, bot: Bot) -> None
 @router.message(Command("menu"))
 async def cmd_menu(message: types.Message, bot: Bot) -> None:
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
+    if str(message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(message, bot, ui_lang=ui_lang)
+        return
     await message.answer(t(ui_lang, "menu_help"), reply_markup=_kb_main_menu(ui_lang, user_id=message.from_user.id if message.from_user else 0))
 
 
 @router.callback_query(F.data == "check_sub")
 async def check_subscription(call: types.CallbackQuery, bot: Bot, state: FSMContext) -> None:
     ui_lang = await _get_ui_lang(call.from_user.id if call.from_user else 0)
-    ch = str(REQUIRED_CHANNEL or "").strip()
-
-    ok = await _is_user_subscribed(bot, call.from_user.id if call.from_user else 0)
-    if not ok:
-        await call.answer(t(ui_lang, "sub_check_fail"), show_alert=True)
-        if call.message:
-            await call.message.answer(
-                t(ui_lang, "must_join_channel", channel=ch),
-                reply_markup=_kb_required_channel(ui_lang),
-                disable_web_page_preview=True,
-            )
-        return
-
-    await call.answer(t(ui_lang, "sub_check_ok"), show_alert=False)
-    resumed = await _resume_pending_after_sub(call, state)
-    if call.message and not resumed:
+    await call.answer(t(ui_lang, "saved_short"), show_alert=False)
+    if call.message:
         await call.message.answer(
             get_about_text(ui_lang),
             reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0, show_start_lang=False),
@@ -1524,6 +1572,10 @@ async def check_subscription(call: types.CallbackQuery, bot: Bot, state: FSMCont
 
 @router.message(Command("topic"))
 async def cmd_topic(message: types.Message, state: FSMContext, bot: Bot) -> None:
+    ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
+    if str(message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(message, bot, ui_lang=ui_lang)
+        return
     if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0, pending_action="menu_topic"):
         return
     if not message.from_user:
@@ -2313,6 +2365,9 @@ def _kb_ui_language_settings(ui_lang: str) -> types.InlineKeyboardMarkup:
 @router.message(Command("lang"))
 async def cmd_ui_language(message: types.Message, bot: Bot) -> None:
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
+    if str(message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(message, bot, ui_lang=ui_lang)
+        return
     await message.answer(t(ui_lang, "ui_lang_choose"), reply_markup=_kb_ui_language_settings(ui_lang))
 
 
@@ -2320,6 +2375,9 @@ async def cmd_ui_language(message: types.Message, bot: Bot) -> None:
 async def menu_ui_language(call: types.CallbackQuery, bot: Bot) -> None:
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
+    if call.message and str(call.message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(call, bot, ui_lang=ui_lang)
+        return
     if call.message:
         await call.message.answer(t(ui_lang, "ui_lang_choose"), reply_markup=_kb_ui_language_settings(ui_lang))
 
@@ -2327,6 +2385,9 @@ async def menu_ui_language(call: types.CallbackQuery, bot: Bot) -> None:
 @router.message(Command("language"))
 async def cmd_language(message: types.Message, bot: Bot) -> None:
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
+    if str(message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(message, bot, ui_lang=ui_lang)
+        return
     if not AI_ENABLED:
         await message.answer(t(ui_lang, "ai_disabled"))
         return
@@ -2390,30 +2451,39 @@ async def set_lang(call: types.CallbackQuery) -> None:
 
 @router.callback_query(F.data == "menu_upload")
 async def menu_upload(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    if call.message and str(call.message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(call, bot, ui_lang=ui_lang)
+        return
     if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0, pending_action="menu_upload"):
         return
     await call.answer()
-    ui_lang = await _get_ui_lang(call.from_user.id)
     if call.message:
         await _open_upload_flow(call.message, state, ui_lang=ui_lang, user_id=call.from_user.id)
 
 
 @router.callback_query(F.data == "menu_topic")
 async def menu_topic(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    if call.message and str(call.message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(call, bot, ui_lang=ui_lang)
+        return
     if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0, pending_action="menu_topic"):
         return
     await call.answer()
-    ui_lang = await _get_ui_lang(call.from_user.id)
     if call.message:
         await _open_topic_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang)
 
 
 @router.callback_query(F.data == "menu_newquiz")
 async def menu_newquiz(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    if call.message and str(call.message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(call, bot, ui_lang=ui_lang)
+        return
     if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0, pending_action="menu_newquiz"):
         return
     await call.answer()
-    ui_lang = await _get_ui_lang(call.from_user.id)
     if call.message:
         await _open_manual_quiz_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang)
 
@@ -2424,6 +2494,10 @@ class PremiumStates(StatesGroup):
     await_screenshot = State()
 
 
+
+
+class AdminBroadcastStates(StatesGroup):
+    waiting_message = State()
 
 
 class UploadStates(StatesGroup):
@@ -2467,7 +2541,6 @@ def _kb_premium_plans(ui_lang: str) -> types.InlineKeyboardMarkup:
         if disc:
             btn += f" (-{disc}%)"
         kb.button(text=btn[:64], callback_data=f"prem_buy:{code}")
-    kb.button(text=t(ui_lang, 'btn_referral'), callback_data='prem_ref')
     kb.button(text=t(ui_lang, 'btn_back'), callback_data='prem_back')
     kb.adjust(1)
     return kb.as_markup()
@@ -2516,11 +2589,29 @@ def _premium_menu_text(ui_lang: str, status: dict) -> str:
     )
 
 
+def _kb_bonus_menu(ui_lang: str) -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(ui_lang, 'btn_referral'), callback_data='prem_ref')
+    kb.button(text=t(ui_lang, 'btn_channel_bonus'), callback_data='prem_channel_bonus')
+    kb.button(text=t(ui_lang, 'btn_back'), callback_data='bonus_back')
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def _bonus_menu_text(ui_lang: str) -> str:
+    ui_lang = norm_ui_lang(ui_lang)
+    return t(ui_lang, 'bonuses_menu_text')
+
+
 @router.message(Command('premium'))
 async def cmd_premium(message: types.Message, bot: Bot) -> None:
     if not message.from_user:
         return
     ui_lang = await _get_ui_lang(message.from_user.id)
+    if str(message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(message, bot, ui_lang=ui_lang)
+        return
     st = await get_user_quota_status(message.from_user.id)
     await message.answer(_premium_menu_text(ui_lang, st), reply_markup=_kb_premium_plans(ui_lang))
 
@@ -2529,9 +2620,23 @@ async def cmd_premium(message: types.Message, bot: Bot) -> None:
 async def menu_premium(call: types.CallbackQuery, bot: Bot) -> None:
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
+    if call.message and str(call.message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(call, bot, ui_lang=ui_lang)
+        return
     st = await get_user_quota_status(call.from_user.id)
     if call.message:
         await call.message.answer(_premium_menu_text(ui_lang, st), reply_markup=_kb_premium_plans(ui_lang))
+
+
+@router.callback_query(F.data == 'menu_bonus')
+async def menu_bonus(call: types.CallbackQuery, bot: Bot) -> None:
+    await call.answer()
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    if call.message and str(call.message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(call, bot, ui_lang=ui_lang)
+        return
+    if call.message:
+        await call.message.answer(_bonus_menu_text(ui_lang), reply_markup=_kb_bonus_menu(ui_lang), disable_web_page_preview=True)
 
 
 @router.callback_query(F.data == 'prem_ref')
@@ -2553,6 +2658,56 @@ async def prem_ref(call: types.CallbackQuery, bot: Bot) -> None:
         await call.message.answer(msg, disable_web_page_preview=True)
 
 
+def _kb_channel_bonus(ui_lang: str) -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    url = _required_channel_url()
+    if url:
+        kb.button(text=t(ui_lang, 'btn_join_channel'), url=url)
+    kb.button(text=t(ui_lang, 'btn_check_sub'), callback_data='prem_channel_check')
+    kb.button(text=t(ui_lang, 'btn_back'), callback_data='bonus_back')
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def _send_channel_bonus_result(call: types.CallbackQuery, bot: Bot) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    ch = str(REQUIRED_CHANNEL or '').strip()
+    if not ch:
+        await call.answer(t(ui_lang, 'channel_bonus_unavailable'), show_alert=True)
+        if call.message:
+            await call.message.answer(t(ui_lang, 'channel_bonus_unavailable'))
+        return
+    if not await _is_user_subscribed(bot, call.from_user.id if call.from_user else 0):
+        await call.answer(t(ui_lang, 'channel_bonus_check_fail'), show_alert=True)
+        if call.message:
+            await call.message.answer(
+                t(ui_lang, 'channel_bonus_prompt', channel=ch),
+                reply_markup=_kb_channel_bonus(ui_lang),
+                disable_web_page_preview=True,
+            )
+        return
+    result = await claim_channel_bonus(call.from_user.id if call.from_user else 0, files=1, topics=1)
+    if not result.get('ok'):
+        await call.answer(t(ui_lang, 'channel_bonus_claimed'), show_alert=True)
+        if call.message:
+            await call.message.answer(t(ui_lang, 'channel_bonus_claimed'))
+        return
+    await call.answer(t(ui_lang, 'channel_bonus_granted'), show_alert=False)
+    if call.message:
+        await call.message.answer(t(ui_lang, 'channel_bonus_granted'))
+
+
+@router.callback_query(F.data == 'prem_channel_bonus')
+async def prem_channel_bonus(call: types.CallbackQuery, bot: Bot) -> None:
+    await _send_channel_bonus_result(call, bot)
+
+
+@router.callback_query(F.data == 'prem_channel_check')
+async def prem_channel_check(call: types.CallbackQuery, bot: Bot) -> None:
+    await _send_channel_bonus_result(call, bot)
+
+
 @router.callback_query(F.data == 'prem_back')
 async def prem_back(call: types.CallbackQuery) -> None:
     await call.answer()
@@ -2561,13 +2716,12 @@ async def prem_back(call: types.CallbackQuery) -> None:
         await call.message.answer(t(ui_lang, "menu_help"), reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0))
 
 
-@router.callback_query(F.data == 'prem_back_plans')
-async def prem_back_plans(call: types.CallbackQuery) -> None:
+@router.callback_query(F.data == 'bonus_back')
+async def bonus_back(call: types.CallbackQuery) -> None:
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
-    st = await get_user_quota_status(call.from_user.id)
     if call.message:
-        await call.message.answer(_premium_menu_text(ui_lang, st), reply_markup=_kb_premium_plans(ui_lang))
+        await call.message.answer(_bonus_menu_text(ui_lang), reply_markup=_kb_bonus_menu(ui_lang), disable_web_page_preview=True)
 
 
 @router.callback_query(F.data.startswith('prem_pay:'))
@@ -2627,7 +2781,7 @@ async def prem_buy(call: types.CallbackQuery, state: FSMContext) -> None:
 
     kb = InlineKeyboardBuilder()
     kb.button(text=t(ui_lang, 'btn_pay'), callback_data=f'prem_pay:{code}')
-    kb.button(text=t(ui_lang, 'btn_back'), callback_data='prem_back_plans')
+    kb.button(text=t(ui_lang, 'btn_back'), callback_data='bonus_back')
     kb.adjust(1)
 
     if call.message:
@@ -3176,6 +3330,9 @@ async def menu_admin_users(call: types.CallbackQuery, bot: Bot) -> None:
     if call.from_user.id not in set(int(x) for x in (ADMIN_IDS or [])):
         await call.answer(t(ui_lang, 'admin_only'), show_alert=True)
         return
+    if call.message and str(call.message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(call, bot, ui_lang=ui_lang)
+        return
     try:
         stats = await get_user_counts_summary()
     except Exception as exc:
@@ -3190,9 +3347,71 @@ async def menu_admin_users(call: types.CallbackQuery, bot: Bot) -> None:
             active=int(stats.get('active_users_last_24h') or 0),
             quizzes=int(stats.get('total_quizzes') or 0),
             attempts=int(stats.get('attempts_last_24h') or 0),
-        )
+        ),
+        reply_markup=_kb_admin_panel(ui_lang),
     )
     await call.answer()
+
+
+@router.callback_query(F.data.startswith('admin_broadcast:'))
+async def admin_broadcast_select(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id if call.from_user else 0)
+    if call.from_user.id not in set(int(x) for x in (ADMIN_IDS or [])):
+        await call.answer(t(ui_lang, 'admin_only'), show_alert=True)
+        return
+    if call.message and str(call.message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(call, bot, ui_lang=ui_lang)
+        return
+    mode = str((call.data or '').split(':', 1)[1] or '').strip().lower()
+    if mode == 'cancel':
+        await state.clear()
+        await call.answer(t(ui_lang, 'admin_broadcast_cancelled'))
+        if call.message:
+            await call.message.answer(t(ui_lang, 'admin_broadcast_cancelled'), reply_markup=_kb_admin_panel(ui_lang))
+        return
+    if mode not in {'users', 'groups'}:
+        await call.answer()
+        return
+    await state.update_data(admin_broadcast_mode=mode)
+    await state.set_state(AdminBroadcastStates.waiting_message)
+    await call.answer()
+    if call.message:
+        key = 'admin_broadcast_users_prompt' if mode == 'users' else 'admin_broadcast_groups_prompt'
+        await call.message.answer(t(ui_lang, key), reply_markup=_kb_admin_broadcast_cancel(ui_lang))
+
+
+@router.message(AdminBroadcastStates.waiting_message)
+async def admin_broadcast_message(message: types.Message, state: FSMContext, bot: Bot) -> None:
+    if not message.from_user:
+        return
+    ui_lang = await _get_ui_lang(message.from_user.id)
+    if message.from_user.id not in set(int(x) for x in (ADMIN_IDS or [])):
+        await state.clear()
+        await message.answer(t(ui_lang, 'admin_only'))
+        return
+    raw = (message.text or message.caption or '').strip()
+    if not raw:
+        await message.answer(t(ui_lang, 'admin_broadcast_text_required'), reply_markup=_kb_admin_broadcast_cancel(ui_lang))
+        return
+    data = await state.get_data()
+    mode = str(data.get('admin_broadcast_mode') or 'users').strip().lower()
+    await state.clear()
+    targets = await (list_broadcast_user_ids() if mode == 'users' else list_broadcast_group_chat_ids())
+    if not targets:
+        await message.answer(t(ui_lang, 'admin_broadcast_no_targets'), reply_markup=_kb_admin_panel(ui_lang))
+        return
+    status = await message.answer(t(ui_lang, 'admin_broadcast_sending', total=len(targets)))
+    sent = 0
+    failed = 0
+    for target in targets:
+        try:
+            await bot.send_message(int(target), raw, disable_web_page_preview=False)
+            sent += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.03)
+    await status.edit_text(t(ui_lang, 'admin_broadcast_done', sent=sent, failed=failed, total=len(targets)))
+    await message.answer(t(ui_lang, 'admin_broadcast_panel'), reply_markup=_kb_admin_panel(ui_lang))
 
 @router.callback_query(F.data == "menu_myquizzes")
 async def menu_myquizzes(call: types.CallbackQuery, bot: Bot) -> None:
@@ -3236,6 +3455,9 @@ async def cmd_mytests(message: types.Message, bot: Bot) -> None:
     if not message.from_user:
         return
     ui_lang = await _get_ui_lang(message.from_user.id)
+    if str(message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(message, bot, ui_lang=ui_lang)
+        return
     quizzes = await list_user_quizzes(message.from_user.id, limit=20)
     if not quizzes:
         await message.answer(t(ui_lang, "no_quizzes_yet"))
@@ -3267,6 +3489,10 @@ async def cmd_mytests(message: types.Message, bot: Bot) -> None:
 
 @router.callback_query(F.data == "menu_cancel")
 async def menu_cancel(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    if call.message and str(call.message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(call, bot, ui_lang=ui_lang)
+        return
     await call.answer()
     chat_id = call.message.chat.id if call.message else 0
     cancelled = await _cancel_user_runs(bot, chat_id=chat_id, user_id=call.from_user.id)
@@ -3279,9 +3505,12 @@ async def menu_cancel(call: types.CallbackQuery, state: FSMContext, bot: Bot) ->
 
 @router.message(Command("newquiz"))
 async def cmd_newquiz(message: types.Message, state: FSMContext, bot: Bot) -> None:
+    ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
+    if str(message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(message, bot, ui_lang=ui_lang)
+        return
     if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0, pending_action="menu_newquiz"):
         return
-    ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
     await _open_manual_quiz_flow(message, state, user_id=message.from_user.id if message.from_user else 0, ui_lang=ui_lang)
 
 
@@ -3294,6 +3523,24 @@ class ManualQuizStates(StatesGroup):
     question_image = State()
     options = State()
     choose_correct = State()
+
+
+def _kb_admin_panel(ui_lang: str) -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(ui_lang, 'btn_admin_broadcast_users'), callback_data='admin_broadcast:users')
+    kb.button(text=t(ui_lang, 'btn_admin_broadcast_groups'), callback_data='admin_broadcast:groups')
+    kb.button(text=t(ui_lang, 'btn_back'), callback_data='prem_back')
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def _kb_admin_broadcast_cancel(ui_lang: str) -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(ui_lang, 'btn_cancel'), callback_data='admin_broadcast:cancel')
+    kb.adjust(1)
+    return kb.as_markup()
 
 
 def _kb_manual_draft_choice(*, ui_lang: str) -> types.InlineKeyboardMarkup:

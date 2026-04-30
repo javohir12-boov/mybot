@@ -35,6 +35,8 @@ class UserSettings(Base):
     ui_lang = Column(Text, default="uz")
     # Whether user explicitly picked UI language at least once (used to show language picker on first /start).
     ui_lang_picked = Column(Boolean, default=False)
+    # One-time optional channel bonus claimed flag.
+    channel_bonus_claimed = Column(Boolean, default=False)
 
 class FreeTrialQuota(Base):
     __tablename__ = 'free_trial_quotas'
@@ -300,6 +302,25 @@ async def get_user_counts_summary() -> dict:
             'active_users_last_24h': active_users_last_24h,
             'since_utc': since,
         }
+
+
+async def list_broadcast_user_ids() -> List[int]:
+    async with async_session() as session:
+        stmt = select(User.id).order_by(User.id.asc())
+        rows = (await session.execute(stmt)).all()
+        return [int(r[0]) for r in rows if int(r[0] or 0) > 0]
+
+
+async def list_broadcast_group_chat_ids() -> List[int]:
+    async with async_session() as session:
+        stmt = (
+            select(func.distinct(QuizAttempt.chat_id))
+            .where(QuizAttempt.chat_id != 0)
+            .where(QuizAttempt.chat_type.in_(['group', 'supergroup']))
+            .order_by(QuizAttempt.chat_id.asc())
+        )
+        rows = (await session.execute(stmt)).all()
+        return [int(r[0]) for r in rows if int(r[0] or 0) != 0]
 
 
 async def get_or_create_user_settings(user_id: int) -> dict:
@@ -568,6 +589,11 @@ async def init_db():
                     except Exception:
                         pass
                 try:
+                    await conn.exec_driver_sql("ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS channel_bonus_claimed BOOLEAN DEFAULT FALSE")
+                    await conn.exec_driver_sql("UPDATE user_settings SET channel_bonus_claimed=FALSE WHERE channel_bonus_claimed IS NULL")
+                except Exception:
+                    pass
+                try:
                     await conn.exec_driver_sql("ALTER TABLE quizzes ADD COLUMN IF NOT EXISTS shuffle_mode TEXT DEFAULT 'none'")
                     await conn.exec_driver_sql("UPDATE quizzes SET shuffle_mode='none' WHERE shuffle_mode IS NULL OR shuffle_mode=''")
                 except Exception:
@@ -592,6 +618,9 @@ async def init_db():
                     await conn.exec_driver_sql("ALTER TABLE user_settings ADD COLUMN ui_lang_picked INTEGER DEFAULT 0")
                     # Preserve existing behavior: do not prompt existing users on /start after migration.
                     await conn.exec_driver_sql("UPDATE user_settings SET ui_lang_picked=1 WHERE ui_lang_picked IS NULL OR ui_lang_picked=0")
+                if "channel_bonus_claimed" not in cols:
+                    await conn.exec_driver_sql("ALTER TABLE user_settings ADD COLUMN channel_bonus_claimed INTEGER DEFAULT 0")
+                    await conn.exec_driver_sql("UPDATE user_settings SET channel_bonus_claimed=0 WHERE channel_bonus_claimed IS NULL")
 
                 res = await conn.exec_driver_sql("PRAGMA table_info(quizzes)")
                 cols = {row[1] for row in res.fetchall()}
@@ -1019,9 +1048,9 @@ def _trial_defaults() -> tuple[int, int, int]:
     """Return (files_total, topics_total, duration_days)."""
 
     try:
-        files_total = int(os.getenv('FREE_TRIAL_FILES', '2') or 2)
+        files_total = int(os.getenv('FREE_TRIAL_FILES', '1') or 1)
     except Exception:
-        files_total = 2
+        files_total = 1
     try:
         topics_total = int(os.getenv('FREE_TRIAL_TOPICS', '1') or 1)
     except Exception:
@@ -1202,6 +1231,66 @@ async def _grant_referral_bonus(user_id: int, *, files: int = 2, topics: int = 1
         tr.topics_total = int(getattr(tr, 'topics_total', 0) or 0) + topics
         session.add(tr)
         await session.commit()
+
+
+async def claim_channel_bonus(user_id: int, *, files: int = 1, topics: int = 1) -> dict:
+    user_id = int(user_id or 0)
+    files = max(0, int(files or 0))
+    topics = max(0, int(topics or 0))
+    if user_id <= 0 or (files == 0 and topics == 0):
+        return {'ok': False, 'reason': 'invalid'}
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    trial_files_total, trial_topics_total, trial_days = _trial_defaults()
+
+    async with async_session() as session:
+        settings = await session.get(UserSettings, user_id)
+        if settings is None:
+            settings = UserSettings(user_id=user_id, default_lang='source', ui_lang='uz', ui_lang_picked=False, channel_bonus_claimed=False)
+            session.add(settings)
+            await session.flush()
+
+        if bool(getattr(settings, 'channel_bonus_claimed', False)):
+            return {'ok': False, 'reason': 'already_claimed'}
+
+        q = await session.get(UserQuota, user_id)
+        if q and _is_premium_active(str(getattr(q, 'premium_until', '') or '')):
+            q.files_total = int(getattr(q, 'files_total', 0) or 0) + files
+            q.topics_total = int(getattr(q, 'topics_total', 0) or 0) + topics
+            q.updated_at = _utc_now_iso()
+            settings.channel_bonus_claimed = True
+            session.add(q)
+            session.add(settings)
+            await session.commit()
+            return {'ok': True, 'reason': 'granted', 'files': files, 'topics': topics}
+
+        tr = await session.get(FreeTrialQuota, user_id)
+        if tr is None:
+            expires = (now + timedelta(days=int(max(1, trial_days)))).isoformat()
+            tr = FreeTrialQuota(
+                user_id=user_id,
+                started_at=now.isoformat(),
+                expires_at=expires,
+                files_total=int(trial_files_total),
+                files_used=0,
+                topics_total=int(trial_topics_total),
+                topics_used=0,
+            )
+            session.add(tr)
+            await session.flush()
+
+        if not _is_trial_active(str(getattr(tr, 'expires_at', '') or '')):
+            tr.expires_at = (now + timedelta(days=1)).isoformat()
+            if not str(getattr(tr, 'started_at', '') or '').strip():
+                tr.started_at = now.isoformat()
+
+        tr.files_total = int(getattr(tr, 'files_total', 0) or 0) + files
+        tr.topics_total = int(getattr(tr, 'topics_total', 0) or 0) + topics
+        settings.channel_bonus_claimed = True
+        session.add(tr)
+        session.add(settings)
+        await session.commit()
+        return {'ok': True, 'reason': 'granted', 'files': files, 'topics': topics}
 
 
 async def qualify_referral_if_any(*, referred_user_id: int) -> dict:

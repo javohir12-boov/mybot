@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
@@ -7,7 +8,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 from aiogram import types
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 
-from config import ADMIN_IDS, REQUIRED_CHANNEL
+from config import ADMIN_IDS, REQUIRED_CHANNEL, REQUIRED_CHANNEL_ENABLED
 from handlers.utils.i18n import norm_ui_lang, t
 from services.database import get_or_create_user, get_or_create_user_settings
 
@@ -40,6 +41,7 @@ class SecurityMiddleware(BaseMiddleware):
         user_refresh_ttl_sec: int = 3600,
         ui_lang_cache_ttl_sec: int = 600,
         required_channel: str = REQUIRED_CHANNEL,
+        required_channel_enabled: bool = REQUIRED_CHANNEL_ENABLED,
         sub_cache_ttl_sec: int = 300,
         sub_prompt_every_sec: float = 0,
     ) -> None:
@@ -52,6 +54,7 @@ class SecurityMiddleware(BaseMiddleware):
         self.ui_lang_cache_ttl_sec = max(60, int(ui_lang_cache_ttl_sec))
 
         self.required_channel = str(required_channel or "").strip()
+        self.required_channel_enabled = bool(required_channel_enabled)
         self.sub_cache_ttl_sec = max(5, int(sub_cache_ttl_sec))
         self.sub_prompt_every_sec = max(0.0, float(sub_prompt_every_sec))
 
@@ -73,6 +76,10 @@ class SecurityMiddleware(BaseMiddleware):
         self._last_sub_prompt: Dict[int, float] = {}
 
         self._gc_ops = 0
+
+    def _channel_gate_enabled(self) -> bool:
+        raw = str(os.getenv("REQUIRED_CHANNEL_ENABLED", "1" if self.required_channel_enabled else "0") or "0").strip().lower()
+        return raw in {"1", "true", "yes", "y", "on"}
 
     def _gc(self) -> None:
         # Best-effort cleanup to avoid unbounded memory growth.
@@ -169,6 +176,8 @@ class SecurityMiddleware(BaseMiddleware):
         return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def _is_subscribed(self, bot: Any, user_id: int, *, force: bool = False) -> bool:
+        if not self._channel_gate_enabled():
+            return True
         if not str(self.required_channel or "").strip():
             return True
         now = time.monotonic()
@@ -270,7 +279,7 @@ class SecurityMiddleware(BaseMiddleware):
         # Mandatory channel subscription gate (optional).
         is_check_sub = isinstance(event, types.CallbackQuery) and str(getattr(event, "data", "") or "") == "check_sub"
         is_ui_lang = self._is_ui_language_event(event)
-        if (not is_ui_lang) and str(self.required_channel or "").strip():
+        if (not is_ui_lang) and self._channel_gate_enabled() and str(self.required_channel or "").strip():
             bot = None
             try:
                 bot = data.get("bot") or getattr(event, "bot", None)

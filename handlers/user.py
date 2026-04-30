@@ -21,7 +21,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from config import AI_ENABLED, ADMIN_IDS, REQUIRED_CHANNEL, get_about_text
+from config import AI_ENABLED, ADMIN_IDS, REQUIRED_CHANNEL, REQUIRED_CHANNEL_ENABLED, get_about_text
 from handlers.utils.i18n import lang_name, norm_ui_lang, t
 from services.ai_service import AIService, AIServiceError, FRIENDLY_TOO_MANY_QUESTIONS, extract_text_from_file
 from services.topic_context_service import fetch_topic_context
@@ -117,6 +117,12 @@ _PAUSED_RUNS_TTL_SEC = 24 * 60 * 60  # best-effort, in-memory only
 _PENDING_AFTER_SUB: Dict[int, str] = {}
 _MANUAL_CORRECT_LOCKS: Dict[int, asyncio.Lock] = {}
 _START_LANG_PROMPT = "🌐 Interfeys tili / Interface language / Язык интерфейса"
+
+
+def _subscription_gate_enabled() -> bool:
+    raw = str(os.getenv("REQUIRED_CHANNEL_ENABLED", "1" if REQUIRED_CHANNEL_ENABLED else "0") or "0").strip().lower()
+    return raw in {"1", "true", "yes", "y", "on"}
+
 
 
 def _manual_correct_lock(user_id: int) -> asyncio.Lock:
@@ -1362,6 +1368,8 @@ def _kb_required_channel(ui_lang: str) -> types.InlineKeyboardMarkup:
     return kb.as_markup()
 
 async def _is_user_subscribed(bot: Bot, user_id: int) -> bool:
+    if not _subscription_gate_enabled():
+        return True
     ch = str(REQUIRED_CHANNEL or "").strip()
     if not ch:
         return True
@@ -1374,6 +1382,8 @@ async def _is_user_subscribed(bot: Bot, user_id: int) -> bool:
 
 async def _ensure_subscribed(event: object, bot: Bot, user_id: int, *, pending_action: str = "") -> bool:
     user_id = int(user_id or 0)
+    if not _subscription_gate_enabled():
+        return True
     ch = str(REQUIRED_CHANNEL or "").strip()
     if not ch:
         return True
@@ -1561,6 +1571,14 @@ async def cmd_menu(message: types.Message, bot: Bot) -> None:
 @router.callback_query(F.data == "check_sub")
 async def check_subscription(call: types.CallbackQuery, bot: Bot, state: FSMContext) -> None:
     ui_lang = await _get_ui_lang(call.from_user.id if call.from_user else 0)
+    if not _subscription_gate_enabled():
+        await call.answer(t(ui_lang, "saved_short"), show_alert=False)
+        if call.message:
+            await call.message.answer(
+                get_about_text(ui_lang),
+                reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0, show_start_lang=False),
+            )
+        return
     await call.answer(t(ui_lang, "saved_short"), show_alert=False)
     if call.message:
         await call.message.answer(
@@ -2721,7 +2739,10 @@ async def bonus_back(call: types.CallbackQuery) -> None:
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
     if call.message:
-        await call.message.answer(_bonus_menu_text(ui_lang), reply_markup=_kb_bonus_menu(ui_lang), disable_web_page_preview=True)
+        await call.message.answer(
+            t(ui_lang, "menu_help"),
+            reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0),
+        )
 
 
 @router.callback_query(F.data.startswith('prem_pay:'))

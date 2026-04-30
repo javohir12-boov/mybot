@@ -92,7 +92,7 @@ elif _req_ch.startswith("t.me/"):
 elif _req_ch and not _req_ch.startswith("@") and not str(_req_ch).lstrip('-').isdigit():
     _req_ch = "@" + _req_ch.lstrip("@")
 REQUIRED_CHANNEL = _req_ch
-
+REQUIRED_CHANNEL_ENABLED = str(_get_env("REQUIRED_CHANNEL_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 THROTTLED_USERS: Dict[int, float] = {}
@@ -167,6 +167,7 @@ __all__ = [
     "SQL_PASSWORD",
     "ADMIN_IDS",
     "REQUIRED_CHANNEL",
+    "REQUIRED_CHANNEL_ENABLED",
     "THROTTLED_USERS",
     "WEBHOOK_URL",
     "WEBHOOK_PATH",

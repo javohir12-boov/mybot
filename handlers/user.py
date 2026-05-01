@@ -4267,13 +4267,15 @@ def _kb_page_presets(session_id: str, total_pages: int, *, ui_lang: str = "uz") 
     kb.adjust(3, 1)
     return kb.as_markup()
 
-def _kb_difficulty(session_id: str, *, ui_lang: str = "uz") -> types.InlineKeyboardMarkup:
+def _kb_difficulty(session_id: str, *, ui_lang: str = "uz", optional: bool = False) -> types.InlineKeyboardMarkup:
     ui_lang = norm_ui_lang(ui_lang)
     kb = InlineKeyboardBuilder()
     kb.button(text=t(ui_lang, "btn_diff_easy"), callback_data=f"ai_diff:{session_id}:easy")
     kb.button(text=t(ui_lang, "btn_diff_medium"), callback_data=f"ai_diff:{session_id}:medium")
     kb.button(text=t(ui_lang, "btn_diff_hard"), callback_data=f"ai_diff:{session_id}:hard")
     kb.button(text=t(ui_lang, "btn_diff_mixed"), callback_data=f"ai_diff:{session_id}:mixed")
+    if optional:
+        kb.button(text=t(ui_lang, "btn_diff_skip"), callback_data=f"ai_diff:{session_id}:skip")
     kb.button(text=t(ui_lang, "btn_cancel"), callback_data=f"ai_cancel:{session_id}")
     kb.adjust(2)
     return kb.as_markup()
@@ -5404,11 +5406,24 @@ async def ai_choose_difficulty_text(message: types.Message, state: FSMContext) -
         return
 
     await state.update_data(ai_difficulty=diff)
+    mode = str(data.get("ai_mode") or "").strip().lower()
 
-    max_n = int(data.get("ai_max_questions") or 50)
-    max_n = max(1, min(50, max_n))
-    user_id = message.from_user.id if message.from_user else 0
-    await _continue_after_topic_settings(message, state, ui_lang=ui_lang, user_id=user_id, max_n=max_n)
+    if mode == "topic":
+        max_n = int(data.get("ai_max_questions") or 50)
+        max_n = max(1, min(50, max_n))
+        user_id = message.from_user.id if message.from_user else 0
+        await _continue_after_topic_settings(message, state, ui_lang=ui_lang, user_id=user_id, max_n=max_n)
+        return
+
+    session_id = str(data.get("ai_session_id") or "")
+    await state.set_state(AIQuizStates.choose_translate)
+    settings = await get_or_create_user_settings(user_id=message.from_user.id if message.from_user else 0)
+    default_lang = str(settings.get("default_lang") or "source")
+    show_pages = bool(data.get("ai_pages_required")) or bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
+    await message.answer(
+        t(ui_lang, "need_translation"),
+        reply_markup=_kb_translate(session_id, default_lang=default_lang, ui_lang=ui_lang, show_pages=show_pages),
+    )
 
 
 @router.callback_query(F.data.startswith("ai_topic_anyway:"))
@@ -5615,6 +5630,17 @@ async def ai_choose_time(call: types.CallbackQuery, state: FSMContext) -> None:
 
     await call.answer()
     await state.update_data(ai_open_period=sec)
+    mode = str(data.get("ai_mode") or "").strip().lower()
+    import_only = bool(data.get("ai_import_only"))
+    if mode == "file":
+        await state.set_state(AIQuizStates.choose_difficulty)
+        if call.message:
+            await call.message.answer(
+                t(ui_lang, "choose_difficulty_optional_file"),
+                reply_markup=_kb_difficulty(session_id, ui_lang=ui_lang, optional=True),
+            )
+        return
+
     await state.set_state(AIQuizStates.choose_translate)
     if call.message:
         settings = await get_or_create_user_settings(user_id=call.from_user.id)
@@ -6130,17 +6156,35 @@ async def ai_choose_difficulty(call: types.CallbackQuery, state: FSMContext) -> 
         await call.answer(t(ui_lang, "session_owner_only"), show_alert=True)
         return
 
-    if diff not in {"easy", "medium", "hard", "mixed"}:
+    mode = str(data.get("ai_mode") or "").strip().lower()
+    if mode == "topic":
+        if diff not in {"easy", "medium", "hard", "mixed"}:
+            await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+            return
+        await call.answer()
+        await state.update_data(ai_difficulty=diff)
+
+        max_n = int(data.get("ai_max_questions") or 50)
+        max_n = max(1, min(50, max_n))
+        if call.message:
+            await _continue_after_topic_settings(call.message, state, ui_lang=ui_lang, user_id=call.from_user.id, max_n=max_n)
+        return
+
+    if diff not in {"easy", "medium", "hard", "mixed", "skip"}:
         await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
         return
 
     await call.answer()
-    await state.update_data(ai_difficulty=diff)
-
-    max_n = int(data.get("ai_max_questions") or 50)
-    max_n = max(1, min(50, max_n))
+    await state.update_data(ai_difficulty="" if diff == "skip" else diff)
+    await state.set_state(AIQuizStates.choose_translate)
     if call.message:
-        await _continue_after_topic_settings(call.message, state, ui_lang=ui_lang, user_id=call.from_user.id, max_n=max_n)
+        settings = await get_or_create_user_settings(user_id=call.from_user.id)
+        default_lang = str(settings.get("default_lang") or "source")
+        show_pages = bool(data.get("ai_pages_required")) or bool(data.get("ai_image_paths")) or bool(str(data.get("ai_pdf_path") or "").strip()) or bool(str(data.get("ai_pptx_path") or "").strip())
+        await call.message.answer(
+            t(ui_lang, "need_translation"),
+            reply_markup=_kb_translate(session_id, default_lang=default_lang, ui_lang=ui_lang, show_pages=show_pages),
+        )
 
 
 async def _start_ai_quiz_after_language(bot: Bot, state: FSMContext, *, chat_id: int, user: types.User, output_language: str) -> None:
@@ -6471,6 +6515,7 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
                 ai_chat_type=message.chat.type,
                 ai_user_id=message.from_user.id if message.from_user else 0,
                 ai_question_count=1,
+                ai_import_only=False,
             )
             cleanup_local = False
             await state.set_state(AIQuizStates.choose_time)
@@ -6611,6 +6656,7 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
                 ai_pages_total=int(pages_total or 0),
                 ai_pages_return="count",
                 ai_pages_required=True,
+                ai_import_only=False,
             )
             if suffix == ".pdf":
                 data_out["ai_pdf_path"] = str(local_path)
@@ -6644,6 +6690,7 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
             ai_pages_total=1,
             ai_pages_return="count",
             ai_pages_required=True,
+            ai_import_only=False,
         )
         await state.set_state(AIQuizStates.choose_pages)
         await status.edit_text(

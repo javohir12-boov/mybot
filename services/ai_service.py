@@ -198,13 +198,26 @@ def _language_instruction(output_language: str) -> str:
 def _difficulty_instruction(difficulty: str) -> str:
     d = (difficulty or "mixed").strip().lower()
     if d in {"mixed", "mix", "aralash", "default", "random"}:
-        return "Savollar turli qiyinlikda bo'lsin (oson, o'rta, qiyin)."
+        return (
+            "Savollar turli qiyinlikda bo'lsin (oson, o'rta, qiyin). "
+            "Asosiy fakt, tushunish, qo'llash va tahlil tipidagi savollar aralash bo'lsin."
+        )
     if d in {"easy", "oson", "yengil", "beginner", "basic", "a1", "a2"}:
-        return "Savollar asosan OSON bo'lsin (beginner)."
+        return (
+            "Savollar asosan OSON bo'lsin (beginner). "
+            "Savollar qisqa, aniq va bitta asosiy tushunchaga qaratilgan bo'lsin; murakkab chalg'ituvchi variantlar ko'p bo'lmasin."
+        )
     if d in {"medium", "middle", "orta", "o'rta", "ortacha", "intermediate", "b1", "b2"}:
-        return "Savollar asosan O'RTA darajada bo'lsin (intermediate)."
+        return (
+            "Savollar asosan O'RTA darajada bo'lsin (intermediate). "
+            "Tushunish, farqlash va qo'llashga oid savollar ko'proq bo'lsin; variantlar bir-biriga yaqin va mantiqiy bo'lsin."
+        )
     if d in {"hard", "qiyin", "murakkab", "advanced", "c1", "c2"}:
-        return "Savollar asosan QIYIN bo'lsin (advanced)."
+        return (
+            "Savollar asosan QIYIN bo'lsin (advanced). "
+            "Faqat yodlashga emas, tahlil, taqqoslash, xulosa chiqarish, qoida qo'llash va misolli/scenariyli savollarga tayansin. "
+            "To'g'ri javobni topish uchun chuqur tushunish talab qilinsin va noto'g'ri variantlar ham kuchli, ammo mantiqan noto'g'ri bo'lsin."
+        )
     return "Savollar turli qiyinlikda bo'lsin (oson, o'rta, qiyin)."
 
 def _topic_coverage_instruction(topic: str, question_count: int) -> str:

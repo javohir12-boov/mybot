@@ -66,6 +66,7 @@ router = Router()
 ai_service = AIService()
 
 _DOWNLOAD_DIR = Path("downloads")
+_PAYLOAD_DIR = _DOWNLOAD_DIR / "payloads"
 _ALLOWED_SUFFIXES = {".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".md", ".json", ".png", ".jpg", ".jpeg", ".webp"}
 # Invisible placeholder keeps the Telegram message bubble compact for menu-only messages.
 # --- Quotas / limits -------------------------------------------------
@@ -123,6 +124,36 @@ def _subscription_gate_enabled() -> bool:
     raw = str(os.getenv("REQUIRED_CHANNEL_ENABLED", "1" if REQUIRED_CHANNEL_ENABLED else "0") or "0").strip().lower()
     return raw in {"1", "true", "yes", "y", "on"}
 
+
+
+def _save_temp_payload(content: str, *, suffix: str = ".txt") -> str:
+    _PAYLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    sfx = suffix if str(suffix or "").startswith(".") else f".{suffix}"
+    path = _PAYLOAD_DIR / f"{uuid.uuid4().hex}{sfx}"
+    path.write_text(str(content or ""), encoding="utf-8", errors="ignore")
+    return str(path)
+
+
+def _load_temp_payload(path_str: str) -> str:
+    raw = str(path_str or "").strip()
+    if not raw:
+        return ""
+    path = Path(raw)
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _cleanup_temp_payload(path_str: str) -> None:
+    raw = str(path_str or "").strip()
+    if not raw:
+        return
+    try:
+        path = Path(raw)
+        if _is_under_dir(path, _DOWNLOAD_DIR) and path.exists():
+            path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _manual_correct_lock(user_id: int) -> asyncio.Lock:
@@ -4703,6 +4734,7 @@ async def ai_cancel(call: types.CallbackQuery, state: FSMContext) -> None:
     image_paths = list(data.get("ai_image_paths") or [])
     pdf_path = str(data.get("ai_pdf_path") or "").strip()
     pptx_path = str(data.get("ai_pptx_path") or "").strip()
+    text_path = str(data.get("ai_text_path") or "").strip()
     await call.answer()
     await state.clear()
     # Cleanup temporary scanned-PDF images (only under downloads/).
@@ -4722,6 +4754,7 @@ async def ai_cancel(call: types.CallbackQuery, state: FSMContext) -> None:
                 shutil.rmtree(d, ignore_errors=True)
     except Exception:
         pass
+    _cleanup_temp_payload(text_path)
     # Cleanup temporary uploaded PDF (file-mode only), only under downloads/.
     if pdf_path:
         try:
@@ -5369,7 +5402,7 @@ async def ai_choose_topic_text(message: types.Message, state: FSMContext) -> Non
 
     mode = str(data.get("ai_mode") or "").strip().lower()
     if mode == "topic" and topic:
-        await state.update_data(ai_title=topic[:120], ai_text="")
+        await state.update_data(ai_title=topic[:120], ai_text="", ai_text_path="")
 
     data = await state.get_data()
     session_id = str(data.get("ai_session_id") or "")
@@ -5690,6 +5723,9 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
     if not data.get("ai_ui_lang"):
         ui_lang = await _get_ui_lang(int(getattr(user, "id", 0) or 0))
     text = str(data.get("ai_text") or "").strip()
+    text_path = str(data.get("ai_text_path") or "").strip()
+    if not text and text_path:
+        text = _load_temp_payload(text_path).strip()
     orig_image_paths: List[str] = list(data.get("ai_image_paths") or [])
     image_paths: List[str] = list(orig_image_paths)
     topic = str(data.get("ai_topic") or "").strip()
@@ -6116,6 +6152,7 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                     Path(str(p)).unlink(missing_ok=True)
                 except Exception:
                     pass
+        _cleanup_temp_payload(text_path)
         # Cleanup temporary uploaded PDF (file-mode only), only under downloads/.
         if pdf_path:
             try:
@@ -6548,13 +6585,15 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
                 raise AIServiceError(t(ui_lang, "import_failed"))
 
             raw = json.dumps({"title": parsed_title or title, "quiz": ready_questions}, ensure_ascii=False)
+            raw_path = _save_temp_payload(raw, suffix=".json")
             session_id = uuid.uuid4().hex
             await state.update_data(
                 ai_session_id=session_id,
                 ai_mode="file",
                 ai_difficulty="",
                 ai_ui_lang=ui_lang,
-                ai_text=raw,
+                ai_text="",
+                ai_text_path=raw_path,
                 ai_title=(parsed_title or title)[:120],
                 ai_open_period=open_period,
                 ai_chat_id=message.chat.id,
@@ -6597,6 +6636,7 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
 
             await status.edit_text(t(ui_lang, "extracting_text"))
             raw = local_path.read_text(encoding="utf-8", errors="ignore") if suffix == ".json" else await asyncio.to_thread(extract_text_from_file, str(local_path))
+            raw_path = _save_temp_payload(raw[:120000], suffix=".json" if suffix == ".json" else ".txt")
 
             session_id = uuid.uuid4().hex
             await state.update_data(
@@ -6604,7 +6644,8 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
                 ai_mode="file",
                 ai_difficulty="",
                 ai_ui_lang=ui_lang,
-                ai_text=raw[:120000],
+                ai_text="",
+                ai_text_path=raw_path,
                 ai_title=title,
                 ai_open_period=open_period,
                 ai_chat_id=message.chat.id,
@@ -6674,6 +6715,7 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
 
         await status.edit_text(t(ui_lang, "extracting_text"))
         text = await asyncio.to_thread(extract_text_from_file, str(local_path))
+        text_path = _save_temp_payload(text[:120000], suffix=".txt")
 
         session_id = uuid.uuid4().hex
         await state.update_data(
@@ -6681,7 +6723,8 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
             ai_mode="file",
             ai_difficulty="",
             ai_ui_lang=ui_lang,
-            ai_text=text[:120000],
+            ai_text="",
+            ai_text_path=text_path,
             ai_title=Path(file_name).stem,
             ai_chat_id=message.chat.id,
             ai_chat_type=message.chat.type,

@@ -201,30 +201,30 @@ def _pop_pending_after_sub(user_id: int) -> str:
 def _lang_flag(code: str) -> str:
     c = str(code or "").strip().lower()
     return {
-        "uz": "рџ‡єрџ‡ї",
-        "ru": "рџ‡·рџ‡є",
-        "en": "рџ‡¬рџ‡§",
-        "de": "рџ‡©рџ‡Є",
-        "tr": "рџ‡№рџ‡·",
-        "kk": "рџ‡°рџ‡ї",
-        "ar": "рџ‡ёрџ‡¦",
-        "zh": "рџ‡Ёрџ‡і",
-        "ko": "рџ‡°рџ‡·",
-    }.get(c, "рџЊђ")
+        "uz": "🇺🇿",
+        "ru": "🇷🇺",
+        "en": "🇬🇧",
+        "de": "🇩🇪",
+        "tr": "🇹🇷",
+        "kk": "🇰🇿",
+        "ar": "🇸🇦",
+        "zh": "🇨🇳",
+        "ko": "🇰🇷",
+    }.get(c, "🌐")
 
 
 def _lang_self_name(code: str) -> str:
     c = str(code or "").strip().lower()
     return {
         "uz": "O'zbek",
-        "ru": "Р СѓСЃСЃРєРёР№",
+        "ru": "Русский",
         "en": "English",
         "de": "Deutsch",
-        "tr": "TГјrkГ§e",
-        "kk": "ТљР°Р·Р°Т›С€Р°",
-        "ar": "Ш§Щ„Ш№Ш±ШЁЩЉШ©",
-        "zh": "дё­ж–‡",
-        "ko": "н•њкµ­м–ґ",
+        "tr": "Turkce",
+        "kk": "Qazaqsha",
+        "ar": "العربية",
+        "zh": "中文",
+        "ko": "한국어",
     }.get(c, c or "")
 
 

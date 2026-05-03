@@ -1832,6 +1832,13 @@ _FINAL_SAFE_OVERRIDES: Dict[str, Dict[str, str]] = {
         "btn_open_private": "\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u0431\u043e\u0442\u0430",
         "private_only_group": "\u041f\u043e\u0436\u0430\u043b\u0443\u0439\u0441\u0442\u0430, \u0438\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u0439\u0442\u0435 \u044d\u0442\u0443 \u043a\u043e\u043c\u0430\u043d\u0434\u0443 \u0432 \u043b\u0438\u0447\u043d\u043e\u043c \u0447\u0430\u0442\u0435 \u0441 \u0431\u043e\u0442\u043e\u043c.",
         "btn_referral": "\u0420\u0435\u0444\u0435\u0440\u0430\u043b\u044c\u043d\u044b\u0439 \u0431\u043e\u043d\u0443\u0441",
+        "ui_lang_choose": "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u044f\u0437\u044b\u043a \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0430:",
+        "ui_lang_saved": "\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e. \u042f\u0437\u044b\u043a \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0430: {lang_name}",
+        "btn_upload": "\u0417\u0430\u0433\u0440\u0443\u0437\u0438\u0442\u044c \u0444\u0430\u0439\u043b",
+        "btn_topic": "\u0422\u0435\u0441\u0442 \u043f\u043e \u0442\u0435\u043c\u0435",
+        "btn_newquiz": "\u041d\u043e\u0432\u044b\u0439 \u0442\u0435\u0441\u0442",
+        "btn_ui_lang": "\u042f\u0437\u044b\u043a \u0438\u043d\u0442\u0435\u0440\u0444\u0435\u0439\u0441\u0430",
+        "btn_premium": "\u041f\u0440\u0435\u043c\u0438\u0443\u043c",
         "btn_channel_bonus": "\u0411\u043e\u043d\u0443\u0441 \u0437\u0430 \u043a\u0430\u043d\u0430\u043b",
         "channel_bonus_unavailable": "\u0411\u043e\u043d\u0443\u0441 \u0437\u0430 \u043a\u0430\u043d\u0430\u043b \u043f\u043e\u043a\u0430 \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d.",
         "channel_bonus_prompt": "\u041f\u043e\u0434\u043f\u0438\u0448\u0438\u0442\u0435\u0441\u044c \u043d\u0430 \u043a\u0430\u043d\u0430\u043b \u0438 \u043f\u043e\u043b\u0443\u0447\u0438\u0442\u0435 \u0431\u043e\u043d\u0443\u0441: +1 \u0444\u0430\u0439\u043b \u0438 +1 \u0442\u0435\u0441\u0442 \u043f\u043e \u0442\u0435\u043c\u0435.\\n\u041a\u0430\u043d\u0430\u043b: {channel}",
@@ -1888,6 +1895,40 @@ def _normalize_loaded_strings() -> None:
 _normalize_loaded_strings()
 
 
+def _repair_mojibake_text(value: str) -> str:
+    if not isinstance(value, str) or not value:
+        return value
+    markers = ("?", "?", "?", "?", "?", "?", "??", "?", "?", "??", "?")
+
+    def score(s: str) -> int:
+        return sum(s.count(m) for m in markers)
+
+    best = value
+    best_score = score(value)
+    for enc in ("cp1251", "latin1"):
+        try:
+            cand = value.encode(enc).decode("utf-8")
+        except Exception:
+            continue
+        cand_score = score(cand)
+        if cand_score < best_score:
+            best = cand
+            best_score = cand_score
+    return best
+
+
+def _repair_mojibake_loaded_strings() -> None:
+    for data in _STRINGS.values():
+        if not isinstance(data, dict):
+            continue
+        for key, value in list(data.items()):
+            if isinstance(value, str):
+                data[key] = _repair_mojibake_text(value)
+
+
+_repair_mojibake_loaded_strings()
+
+
 def _repair_corrupted_strings() -> None:
     en_base = _STRINGS.get("en", {})
     for data in _STRINGS.values():
@@ -1901,6 +1942,45 @@ def _repair_corrupted_strings() -> None:
 
 
 _repair_corrupted_strings()
+
+
+def _fallback_mojibake_to_english() -> None:
+    en_base = _STRINGS.get("en", {})
+    markers = ("?", "?", "?", "?", "?", "?", "??", "?", "?", "?", "?")
+    for lang, data in _STRINGS.items():
+        if lang == "en" or not isinstance(data, dict):
+            continue
+        for key, value in list(data.items()):
+            if not isinstance(value, str):
+                continue
+            score = sum(value.count(m) for m in markers)
+            if score >= 2 and en_base.get(key):
+                data[key] = en_base[key]
+
+    _STRINGS.setdefault("kk", {}).update({
+        "btn_premium": "Premium",
+        "btn_bonuses": "\u0411\u043e\u043d\u0443\u0441\u0442\u0430\u0440",
+        "btn_check_sub": "\u0422\u0435\u043a\u0441\u0435\u0440\u0443",
+    })
+    _STRINGS.setdefault("ar", {}).update({
+        "btn_premium": "بريميوم",
+        "btn_bonuses": "المكافآت",
+        "btn_check_sub": "تحقق",
+    })
+    _STRINGS.setdefault("zh", {}).update({
+        "btn_premium": "高级版",
+        "btn_bonuses": "奖励",
+        "btn_diff_skip": "跳过",
+        "btn_check_sub": "检查",
+    })
+    _STRINGS.setdefault("ko", {}).update({
+        "btn_premium": "프리미엄",
+        "btn_bonuses": "보너스",
+        "btn_check_sub": "확인",
+    })
+
+
+_fallback_mojibake_to_english()
 
 
 def norm_ui_lang(lang: str) -> str:

@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import html
 import json
 import os
@@ -117,7 +117,7 @@ _PAUSED_RUNS: Dict[str, "PausedRun"] = {}
 _PAUSED_RUNS_TTL_SEC = 24 * 60 * 60  # best-effort, in-memory only
 _PENDING_AFTER_SUB: Dict[int, str] = {}
 _MANUAL_CORRECT_LOCKS: Dict[int, asyncio.Lock] = {}
-_START_LANG_PROMPT = "🌐 Interfeys tili / Interface language / Язык интерфейса"
+_START_LANG_PROMPT = "рџЊђ Interfeys tili / Interface language / РЇР·С‹Рє РёРЅС‚РµСЂС„РµР№СЃР°"
 
 
 def _subscription_gate_enabled() -> bool:
@@ -201,30 +201,30 @@ def _pop_pending_after_sub(user_id: int) -> str:
 def _lang_flag(code: str) -> str:
     c = str(code or "").strip().lower()
     return {
-        "uz": "🇺🇿",
-        "ru": "🇷🇺",
-        "en": "🇬🇧",
-        "de": "🇩🇪",
-        "tr": "🇹🇷",
-        "kk": "🇰🇿",
-        "ar": "🇸🇦",
-        "zh": "🇨🇳",
-        "ko": "🇰🇷",
-    }.get(c, "🌐")
+        "uz": "рџ‡єрџ‡ї",
+        "ru": "рџ‡·рџ‡є",
+        "en": "рџ‡¬рџ‡§",
+        "de": "рџ‡©рџ‡Є",
+        "tr": "рџ‡№рџ‡·",
+        "kk": "рџ‡°рџ‡ї",
+        "ar": "рџ‡ёрџ‡¦",
+        "zh": "рџ‡Ёрџ‡і",
+        "ko": "рџ‡°рџ‡·",
+    }.get(c, "рџЊђ")
 
 
 def _lang_self_name(code: str) -> str:
     c = str(code or "").strip().lower()
     return {
         "uz": "O'zbek",
-        "ru": "Русский",
+        "ru": "Р СѓСЃСЃРєРёР№",
         "en": "English",
         "de": "Deutsch",
-        "tr": "Türkçe",
-        "kk": "Қазақша",
-        "ar": "العربية",
-        "zh": "中文",
-        "ko": "한국어",
+        "tr": "TГјrkГ§e",
+        "kk": "ТљР°Р·Р°Т›С€Р°",
+        "ar": "Ш§Щ„Ш№Ш±ШЁЩЉШ©",
+        "zh": "дё­ж–‡",
+        "ko": "н•њкµ­м–ґ",
     }.get(c, c or "")
 
 
@@ -705,11 +705,11 @@ def _user_mention_html(user_id: int, name: str, username: str = "") -> str:
 
 def _rank_icon(i: int) -> str:
     if i == 1:
-        return "🥇"
+        return "рџҐ‡"
     if i == 2:
-        return "🥈"
+        return "рџҐ€"
     if i == 3:
-        return "🥉"
+        return "рџҐ‰"
     return f"{i}."
 
 
@@ -738,11 +738,11 @@ def _format_scoreboard(run: QuizRun, *, limit: int = 20) -> str:
     rows.sort(key=lambda x: (-x["correct"], -x["answered"], x["total_time"], str(x["name"]).lower()))
 
     title = t(ui_lang, "scoreboard_title").rstrip(":").strip() or "Results"
-    lines: List[str] = [f"🏆 <b>{html.escape(title)}</b>"]
+    lines: List[str] = [f"рџЏ† <b>{html.escape(title)}</b>"]
 
     if run.chat_type in {"group", "supergroup"} and run.participants:
-        lines.append("👥 " + html.escape(t(ui_lang, "participants_joined", n=len(run.participants))))
-    lines.append("🧾 " + html.escape(t(ui_lang, "total_questions", n=total_questions)))
+        lines.append("рџ‘Ґ " + html.escape(t(ui_lang, "participants_joined", n=len(run.participants))))
+    lines.append("рџ§ѕ " + html.escape(t(ui_lang, "total_questions", n=total_questions)))
     lines.append("")
 
     shown = rows[: max(1, int(limit or 20))]
@@ -754,12 +754,12 @@ def _format_scoreboard(run: QuizRun, *, limit: int = 20) -> str:
 
         lines.append(f"{icon} {mention}")
 
-        detail_parts = [f"✅ {int(r['correct'])}/{int(r['answered'])}"]
-        detail_parts.append(f"⏱ {int(r['total_time'])}s")
+        detail_parts = [f"вњ… {int(r['correct'])}/{int(r['answered'])}"]
+        detail_parts.append(f"вЏ± {int(r['total_time'])}s")
         if int(r["answered"]):
-            detail_parts.append(f"⌀ {avg_s}s")
+            detail_parts.append(f"вЊЂ {avg_s}s")
         if missed:
-            detail_parts.append(f"⏭ {missed}")
+            detail_parts.append(f"вЏ­ {missed}")
         lines.append("   " + " | ".join(detail_parts))
         lines.append("")
 
@@ -1798,9 +1798,9 @@ async def quiz_stats(call: types.CallbackQuery) -> None:
     qcount = int(summary.get("question_count") or 0)
 
     head = t(ui_lang, "stats_title", title=title)
-    lines: List[str] = [f"📈 <b>{html.escape(head)}</b>"]
-    lines.append(f"🆔 ID: {int(quiz_id)}")
-    lines.append(f"📍 {html.escape(t(ui_lang, 'total_questions', n=qcount))}")
+    lines: List[str] = [f"рџ“€ <b>{html.escape(head)}</b>"]
+    lines.append(f"рџ†” ID: {int(quiz_id)}")
+    lines.append(f"рџ“Ќ {html.escape(t(ui_lang, 'total_questions', n=qcount))}")
     lines.append("")
 
     for i, item in enumerate(stats[:30], start=1):
@@ -1816,10 +1816,10 @@ async def quiz_stats(call: types.CallbackQuery) -> None:
 
         mention = _user_mention_html(uid, name, username)
         lines.append(f"{_rank_icon(i)} {mention}")
-        details = [f"✅ {correct}/{answered}", f"⏱ {total_time_s}s"]
+        details = [f"вњ… {correct}/{answered}", f"вЏ± {total_time_s}s"]
         if answered:
-            details.append(f"⌀ {avg_s}s")
-        details.append(f"🔁 {attempts}x")
+            details.append(f"вЊЂ {avg_s}s")
+        details.append(f"рџ”Ѓ {attempts}x")
         lines.append("   " + " | ".join(details))
         lines.append("")
 
@@ -3729,10 +3729,14 @@ async def _restore_manual_draft_if_needed(state: FSMContext, *, user_id: int, ui
         merged["m_ui_lang"] = restored_lang
         if merged != data:
             await state.update_data(**merged)
+        if str(st) != restored_state:
+            await state.set_state(restored_state)
         return merged
 
     await state.clear()
-    await state.update_data(**draft_data, m_ui_lang=restored_lang)
+    restored_payload = dict(draft_data)
+    restored_payload["m_ui_lang"] = restored_lang
+    await state.update_data(**restored_payload)
     await state.set_state(restored_state)
     return await state.get_data()
 
@@ -3768,15 +3772,31 @@ async def manual_draft_restart(call: types.CallbackQuery, state: FSMContext) -> 
 async def manual_draft_resume(call: types.CallbackQuery, state: FSMContext) -> None:
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
+    draft = await get_manual_quiz_draft(user_id=call.from_user.id)
+    if not draft:
+        await state.clear()
+        await state.update_data(m_ui_lang=ui_lang)
+        await state.set_state(ManualQuizStates.title)
+        if call.message:
+            try:
+                await call.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
+            await call.message.answer(t(ui_lang, "manual_title_prompt"))
+        return
+
     data = await _restore_manual_draft_if_needed(state, user_id=call.from_user.id, ui_lang=ui_lang)
-    st = await state.get_state()
+    st = str(draft.get("state") or await state.get_state() or ManualQuizStates.title.state)
     ui_lang = norm_ui_lang(str(data.get("m_ui_lang") or ui_lang))
-    st = str(st or ManualQuizStates.title.state)
     if call.message:
+        try:
+            await call.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
         prompt, markup = _manual_prompt_for_state(ui_lang=ui_lang, state_str=st, data=await state.get_data())
         await call.message.answer(prompt, reply_markup=markup)
-
 @router.message(ManualQuizStates.title)
 async def manual_title(message: types.Message, state: FSMContext) -> None:
     data = await state.get_data()
@@ -5170,7 +5190,7 @@ def _parse_topic_count_time(raw_text: str, *, max_count: int = 50) -> tuple[str,
             except Exception:
                 n = 0
             prefix = raw[: m.start()].strip()
-            if prefix and re.search(r"[A-Za-zРђ-РЇР°-СЏРЋСћТљТ›Т’Т“ТІТіРЃС‘Д°Д±]", prefix):
+            if prefix and re.search(r"[A-Za-zР С’-Р Р‡Р В°-РЎРЏР Р‹РЎС›РўС™РўвЂєРўвЂ™РўвЂњРўР†РўС–Р РѓРЎвЂР”В°Р”В±]", prefix):
                 counts = [n]
                 topic = raw[: m.start()].strip()
 
@@ -5179,7 +5199,7 @@ def _parse_topic_count_time(raw_text: str, *, max_count: int = 50) -> tuple[str,
     topic = re.sub(r"(?i)\b(?:test|quiz|savol|qil|qiling|qilib|yarat|tuz|tuzib|ber|qilib\s*ber)\b", " ", topic)
     topic = re.sub(r"[;,|]+", " ", topic)
     topic = re.sub(r"\s+", " ", topic).strip()
-    topic = re.sub(r"(?i)\b(?:dan|bo'yicha|boвЂyicha|uchun|haqida)\b\s*$", "", topic).strip()
+    topic = re.sub(r"(?i)\b(?:dan|bo'yicha|boРІР‚Вyicha|uchun|haqida)\b\s*$", "", topic).strip()
 
     # Clamp values to reasonable ranges.
     max_count = max(1, min(50, int(max_count or 50)))
@@ -5236,7 +5256,7 @@ async def ai_choose_pages_text(message: types.Message, state: FSMContext) -> Non
         return
 
     low = raw.strip().lower()
-    if low in {"-", "0", "yoq", "yo'q", "yoвЂq", "none", "no", "skip", "all", "hammasi"}:
+    if low in {"-", "0", "yoq", "yo'q", "yoРІР‚Вq", "none", "no", "skip", "all", "hammasi"}:
         await message.answer(t(ui_lang, "pages_required"))
         await message.answer(
             t(ui_lang, "pages_prompt", total=total_pages or 0),
@@ -5524,7 +5544,7 @@ async def ai_choose_count_text(message: types.Message, state: FSMContext) -> Non
     if has_pages:
         pr = _parse_page_range(text)
         looks_like_pages = bool(re.search(r"\d+\s*(?:-|\\.\\.)\s*\d+", text)) or bool(
-            re.search(r"(?i)\b(sahifa|bet|page|pages|СЃС‚СЂ|СЃС‚СЂР°РЅРёС†)\b", text)
+            re.search(r"(?i)\b(sahifa|bet|page|pages|РЎРѓРЎвЂљРЎР‚|РЎРѓРЎвЂљРЎР‚Р В°Р Р…Р С‘РЎвЂ )\b", text)
         )
         if pr and looks_like_pages:
             p_from, p_to = pr
@@ -5699,7 +5719,7 @@ async def _animate_working_message(
         return
 
     base = str(base_text or "").strip()
-    base = base.rstrip(".").rstrip("…").strip() or str(base_text or "").strip()
+    base = base.rstrip(".").rstrip("вЂ¦").strip() or str(base_text or "").strip()
     frames = [".", "..", "..."]
     i = 0
     while not stop.is_set():
@@ -6751,6 +6771,7 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
                 local_path.unlink(missing_ok=True)
             except Exception:
                 pass
+
 
 
 

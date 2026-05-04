@@ -220,8 +220,8 @@ def _lang_self_name(code: str) -> str:
         "ru": "Русский",
         "en": "English",
         "de": "Deutsch",
-        "tr": "Turkce",
-        "kk": "Qazaqsha",
+        "tr": "T?rk?e",
+        "kk": "???????",
         "ar": "العربية",
         "zh": "中文",
         "ko": "한국어",
@@ -1520,6 +1520,10 @@ async def cmd_start_deeplink(
                 pass
         payload = ''
 
+    if str(message.chat.type or "").lower() in {"group", "supergroup"} and not payload.startswith("quiz_"):
+        await _send_private_only_notice(message, bot, ui_lang=ui_lang)
+        return
+
     if payload.startswith("quiz_"):
         raw_id = payload.split("_", 1)[1]
         try:
@@ -1557,6 +1561,10 @@ async def cmd_start_deeplink(
     settings = await get_or_create_user_settings(user_id=user_id) if user_id else {"ui_lang": "uz", "ui_lang_picked": True}
     ui_lang = norm_ui_lang(str(settings.get("ui_lang") or "uz"))
     _set_ui_lang_cache(int(user_id or 0), ui_lang)
+
+    if str(message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(message, bot, ui_lang=ui_lang)
+        return
 
     await _qualify_referral_and_notify(bot, user_id=user_id)
     await message.answer(
@@ -2395,7 +2403,7 @@ def _kb_ai_language_settings(ui_lang: str) -> types.InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text=t(ui_lang, "lang_source"), callback_data="set_lang:source")
     for code in ("uz", "ru", "en", "de", "tr", "kk", "ar", "zh", "ko"):
-        kb.button(text=lang_name(code), callback_data=f"set_lang:{code}")
+        kb.button(text=_lang_label_with_flag(code), callback_data=f"set_lang:{code}")
     kb.adjust(3, 3, 3, 1)
     return kb.as_markup()
 
@@ -4558,7 +4566,7 @@ async def run_cancel(call: types.CallbackQuery, bot: Bot) -> None:
         await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
         return
     if call.from_user.id != run.created_by:
-        await call.answer(t(run.ui_lang, "lobby_creator_only"), show_alert=True)
+        await call.answer(t(run.ui_lang, "group_stop_owner_only"), show_alert=True)
         return
 
     await call.answer(t(run.ui_lang, "stopped"))

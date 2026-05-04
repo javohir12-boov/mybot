@@ -1898,7 +1898,7 @@ _normalize_loaded_strings()
 def _repair_mojibake_text(value: str) -> str:
     if not isinstance(value, str) or not value:
         return value
-    markers = ("?", "?", "?", "?", "?", "?", "??", "?", "?", "??", "?")
+    markers = ("Ð", "Ñ", "Р", "С", "рџ", "Ѓ", "‚", "€", "™", "??")
 
     def score(s: str) -> int:
         return sum(s.count(m) for m in markers)
@@ -1946,7 +1946,7 @@ _repair_corrupted_strings()
 
 def _fallback_mojibake_to_english() -> None:
     en_base = _STRINGS.get("en", {})
-    markers = ("?", "?", "?", "?", "?", "?", "??", "?", "?", "?", "?")
+    markers = ("Ð", "Ñ", "Р", "С", "рџ", "Ѓ", "‚", "€", "™", "??")
     for lang, data in _STRINGS.items():
         if lang == "en" or not isinstance(data, dict):
             continue
@@ -1983,6 +1983,482 @@ def _fallback_mojibake_to_english() -> None:
 _fallback_mojibake_to_english()
 
 
+_FINAL_CLEAN_OVERRIDES: Dict[str, Dict[str, str]] = {'uz': {'btn_referral': 'Referral bonusi',
+        'btn_channel_bonus': 'Kanal bonusi',
+        'btn_bonuses': 'Bonuslar',
+        'btn_admin_users': 'Statistika foydalanuvchilar',
+        'btn_back': 'Orqaga',
+        'menu_help': "Menyudagi bo'limlar:\n"
+                     '- Fayl yuklash: fayl yoki elektron kitob yuklash orqali test tuzishingiz mumkin.\n'
+                     "- Mavzu bo'yicha test: mavzuni yozib, qiyinlik, son va vaqtni tanlab test tuzishingiz mumkin.\n"
+                     "- Yangi test: savollarni qo'lda kiritib test tuzishingiz mumkin.\n"
+                     "- Interfeys tili: botning interfeys tilini o'zgartirishingiz mumkin.\n"
+                     "- Premium: limitlarni oshirish va premium olish bo'limi.\n"
+                     "- Bonuslar: referral va kanal bonusi bo'limi.",
+        'bonuses_menu_text': "Bonuslar bo'limi.\n"
+                             "- Referral bonusi: havolangiz orqali do'st taklif qiling.\n"
+                             "- Kanal bonusi: kanalga a'zo bo'lib +1 fayl va +1 mavzu testi oling.",
+        'topic_prompt': "Qaysi mavzu bo'yicha test tuzay?\nMavzuni yozing.\nMisol: `Davlatlar poytaxtlari`",
+        'file_topic_prompt': "Yuklangan fayl ichidan qaysi mavzuga e'tibor qaratay? (ixtiyoriy)\n"
+                             'Mavzuni yozing.\n'
+                             'Misol: `Davlatlar poytaxtlari`',
+        'need_translation': 'Tarjima kerakmi?',
+        'shuffle_strategy_prompt': 'Random tartibni qanday ishlataylik?',
+        'choose_translation_lang': 'Qaysi tilga tarjima qilay?',
+        'pages_prompt': "Qaysi sahifalar oralig'idan test tuzay? (1..{total})\nMisol: `20-30` yoki `20`",
+        'manual_has_image': 'Savol uchun rasm bormi? Rasm yuboring yoki /skip yozing.',
+        'manual_draft_found': "Sizda saqlangan qo'lda tuzilayotgan test bor. Davom ettiraymi?",
+        'edit_menu': 'Test: {title}\nSavollar: {count} ta\nHar savol: {sec}s\nID: {id}\n\nNimani tahrirlaymiz?',
+        'premium_choose_plan': 'Premium tariflardan birini tanlang:',
+        'premium_status_free': 'Bepul tarif (bir martalik):\n'
+                               'Fayl limiti: {f_left}/{f_total}\n'
+                               'Mavzu limiti: {t_left}/{t_total}\n'
+                               'Amal qilish muddati: {days} kun (tugash: {until})',
+        'premium_status_premium': 'Premium tarif faol.\n'
+                                  'Amal qilish muddati: {until}\n'
+                                  'Fayl limiti: {f_left}/{f_total}\n'
+                                  'Mavzu limiti: {t_left}/{t_total}',
+        'premium_plan_1d': '1 kun',
+        'premium_plan_7d': '7 kun',
+        'premium_plan_30d': '1 oy',
+        'premium_plan_details': 'Tanlangan tarif: {plan}\n'
+                                'Davomiyligi: {days} kun\n'
+                                'Narxi: {price} UZS\n'
+                                'Chegirma: -{disc}%\n'
+                                '\n'
+                                'Limitlar:\n'
+                                'Fayl: {files}\n'
+                                'Mavzu: {topics}\n'
+                                '\n'
+                                "Davom etish uchun `To'lov qilish` tugmasini bosing.",
+        'btn_upload': 'Fayl yuklash',
+        'btn_topic': "Mavzu bo'yicha test",
+        'btn_newquiz': 'Yangi test',
+        'btn_ui_lang': 'Interfeys tili',
+        'btn_premium': 'Premium'},
+ 'ru': {'btn_referral': 'Реферальный бонус',
+        'btn_channel_bonus': 'Бонус за канал',
+        'btn_bonuses': 'Бонусы',
+        'btn_admin_users': 'Статистика пользователей',
+        'btn_back': 'Назад',
+        'menu_help': 'Разделы меню:\n'
+                     '- Загрузить файл: загрузите файл или электронную книгу, чтобы создать тест.\n'
+                     '- Тест по теме: введите тему, выберите сложность, количество и время.\n'
+                     '- Новый тест: создайте тест вручную.\n'
+                     '- Язык интерфейса: измените язык кнопок и сообщений бота.\n'
+                     '- Премиум: увеличьте лимиты и получите премиум.\n'
+                     '- Бонусы: откройте бонусный раздел.',
+        'bonuses_menu_text': 'Раздел бонусов.\n'
+                             '- Реферальный бонус: приглашайте друзей по своей ссылке.\n'
+                             '- Бонус за канал: подпишитесь на канал и получите +1 файл и +1 тест по теме.',
+        'topic_prompt': 'По какой теме сделать тест?\nНапишите тему.\nПример: `Столицы государств`',
+        'file_topic_prompt': 'На какой теме внутри загруженного файла сфокусироваться? (необязательно)\n'
+                             'Напишите тему.\n'
+                             'Пример: `Столицы государств`',
+        'need_translation': 'Нужен перевод?',
+        'shuffle_strategy_prompt': 'Как должен работать случайный порядок?',
+        'choose_translation_lang': 'На какой язык перевести?',
+        'pages_prompt': 'Какой диапазон страниц использовать? (1..{total})\nПример: `20-30` или `20`',
+        'manual_has_image': 'Есть картинка к вопросу? Отправьте её или напишите /skip.',
+        'manual_draft_found': 'У вас есть сохранённый черновик теста. Продолжить?',
+        'edit_menu': 'Тест: {title}\nВопросов: {count}\nНа вопрос: {sec}s\nID: {id}\n\nЧто редактируем?',
+        'premium_choose_plan': 'Выберите один из премиум-тарифов:',
+        'premium_status_free': 'Бесплатный тариф (одноразовый):\n'
+                               'Лимит по файлам: {f_left}/{f_total}\n'
+                               'Лимит по темам: {t_left}/{t_total}\n'
+                               'Срок действия: {days} дн. (до: {until})',
+        'premium_status_premium': 'Премиум-тариф активен.\n'
+                                  'Срок действия: {until}\n'
+                                  'Лимит по файлам: {f_left}/{f_total}\n'
+                                  'Лимит по темам: {t_left}/{t_total}',
+        'premium_plan_1d': '1 день',
+        'premium_plan_7d': '7 дней',
+        'premium_plan_30d': '1 месяц',
+        'premium_plan_details': 'Выбранный тариф: {plan}\n'
+                                'Срок действия: {days} дн.\n'
+                                'Стоимость: {price} UZS\n'
+                                'Скидка: -{disc}%\n'
+                                '\n'
+                                'Лимиты:\n'
+                                'Файлы: {files}\n'
+                                'Темы: {topics}\n'
+                                '\n'
+                                'Нажмите `Оплатить`, чтобы продолжить.',
+        'btn_upload': 'Загрузить файл',
+        'btn_topic': 'Тест по теме',
+        'btn_newquiz': 'Новый тест',
+        'btn_ui_lang': 'Язык интерфейса',
+        'btn_premium': 'Премиум',
+        'btn_join_channel': 'Подписаться на канал',
+        'btn_check_sub': 'Проверить'},
+ 'en': {'btn_referral': 'Referral bonus',
+        'btn_channel_bonus': 'Channel bonus',
+        'btn_bonuses': 'Bonuses',
+        'btn_admin_users': 'User statistics'},
+ 'de': {'btn_referral': 'Empfehlungsbonus',
+        'btn_channel_bonus': 'Kanalbonus',
+        'btn_bonuses': 'Boni',
+        'btn_admin_users': 'Benutzerstatistik',
+        'btn_back': 'Zuruck',
+        'menu_help': 'Menubereiche:\n'
+                     '- Datei hochladen: Laden Sie eine Datei oder ein E-Book hoch, um einen Test zu erstellen.\n'
+                     '- Test nach Thema: Geben Sie ein Thema ein und wahlen Sie Schwierigkeit, Anzahl und Zeit.\n'
+                     '- Neuer Test: Erstellen Sie einen Test manuell.\n'
+                     '- Oberflachensprache: Andern Sie die Sprache der Bot-Oberflache.\n'
+                     '- Premium: Erhohen Sie die Limits und erhalten Sie Premium.\n'
+                     '- Boni: Offnen Sie den Bonusbereich.',
+        'bonuses_menu_text': 'Bonusbereich.\n'
+                             '- Empfehlungsbonus: Laden Sie Freunde uber Ihren Link ein.\n'
+                             '- Kanalbonus: Treten Sie dem Kanal bei und erhalten Sie +1 Datei und +1 Themenquiz.',
+        'topic_prompt': 'Zu welchem Thema mochten Sie einen Test erstellen?\n'
+                        'Bitte geben Sie das Thema ein.\n'
+                        'Beispiel: `Hauptstadte der Welt`',
+        'file_topic_prompt': 'Auf welches Thema innerhalb der hochgeladenen Datei mochten Sie sich konzentrieren? '
+                             '(optional)\n'
+                             'Bitte geben Sie das Thema ein.\n'
+                             'Beispiel: `Hauptstadte der Welt`',
+        'need_translation': 'Ubersetzung notig?',
+        'shuffle_strategy_prompt': 'Wie soll die Zufallsreihenfolge funktionieren?',
+        'choose_translation_lang': 'In welche Sprache soll ubersetzt werden?',
+        'pages_prompt': 'Welcher Seitenbereich soll verwendet werden? (1..{total})\nBeispiel: `20-30` oder `20`',
+        'manual_has_image': 'Gibt es ein Bild zur Frage? Senden Sie es oder schreiben Sie /skip.',
+        'manual_draft_found': 'Sie haben einen gespeicherten Testentwurf. Fortfahren?',
+        'premium_status_free': 'Kostenloser Tarif (einmalig):\n'
+                               'Dateilimit: {f_left}/{f_total}\n'
+                               'Themenlimit: {t_left}/{t_total}\n'
+                               'Gultigkeit: {days} Tag(e) (bis: {until})',
+        'premium_status_premium': 'Premium-Tarif ist aktiv.\n'
+                                  'Gultig bis: {until}\n'
+                                  'Dateilimit: {f_left}/{f_total}\n'
+                                  'Themenlimit: {t_left}/{t_total}',
+        'premium_plan_1d': '1 Tag',
+        'premium_plan_7d': '7 Tage',
+        'premium_plan_30d': '1 Monat',
+        'premium_plan_details': 'Gewahlter Tarif: {plan}\n'
+                                'Laufzeit: {days} Tag(e)\n'
+                                'Preis: {price} UZS\n'
+                                'Rabatt: -{disc}%\n'
+                                '\n'
+                                'Limits:\n'
+                                'Dateien: {files}\n'
+                                'Themen: {topics}\n'
+                                '\n'
+                                'Drucken Sie `Bezahlen`, um fortzufahren.'},
+ 'tr': {'btn_referral': 'Referans bonusu',
+        'btn_channel_bonus': 'Kanal bonusu',
+        'btn_bonuses': 'Bonuslar',
+        'btn_admin_users': 'Kullanici istatistikleri',
+        'btn_back': 'Geri',
+        'menu_help': 'Menu bolumleri:\n'
+                     '- Dosya yukle: test olusturmak icin dosya veya e-kitap gonderebilirsiniz.\n'
+                     '- Konuya gore test: konu yazip zorluk, adet ve sure secerek test olusturabilirsiniz.\n'
+                     '- Yeni test: sorulari elle girerek test olusturabilirsiniz.\n'
+                     '- Arayuz dili: botun arayuz dilini degistirebilirsiniz.\n'
+                     '- Premium: limitleri artirip premium alabilirsiniz.\n'
+                     '- Bonuslar: bonuslar bolumunu acabilirsiniz.',
+        'bonuses_menu_text': 'Bonuslar bolumu.\n'
+                             '- Referans bonusu: arkadaslarinizi baglantinizla davet edin.\n'
+                             '- Kanal bonusu: kanala katilin ve +1 dosya ile +1 konu testi kazanin.',
+        'topic_prompt': 'Testi hangi konuya gore olusturmak istersiniz?\n'
+                        'Lutfen konuyu yazin.\n'
+                        'Ornek: `Dunya baskentleri`',
+        'file_topic_prompt': 'Yuklenen dosyada hangi konuya odaklanayim? (istege bagli)\n'
+                             'Lutfen konuyu yazin.\n'
+                             'Ornek: `Dunya baskentleri`',
+        'need_translation': 'Ceviri gerekli mi?',
+        'shuffle_strategy_prompt': 'Rastgele sira nasil calissin?',
+        'choose_translation_lang': 'Hangi dile cevirilsin?',
+        'pages_prompt': 'Hangi sayfa araligi kullanilsin? (1..{total})\nOrnek: `20-30` veya `20`',
+        'manual_has_image': 'Soru icin resim var mi? Gonderin veya /skip yazin.',
+        'manual_draft_found': 'Kaydedilmis bir test taslaginiz var. Devam edilsin mi?',
+        'premium_status_free': 'Ucretsiz plan (tek seferlik):\n'
+                               'Dosya limiti: {f_left}/{f_total}\n'
+                               'Konu limiti: {t_left}/{t_total}\n'
+                               'Gecerlilik suresi: {days} gun (bitis: {until})',
+        'premium_status_premium': 'Premium plan aktif.\n'
+                                  'Gecerlilik suresi: {until}\n'
+                                  'Dosya limiti: {f_left}/{f_total}\n'
+                                  'Konu limiti: {t_left}/{t_total}',
+        'premium_plan_1d': '1 gun',
+        'premium_plan_7d': '7 gun',
+        'premium_plan_30d': '1 ay',
+        'premium_plan_details': 'Secilen plan: {plan}\n'
+                                'Sure: {days} gun\n'
+                                'Fiyat: {price} UZS\n'
+                                'Indirim: -{disc}%\n'
+                                '\n'
+                                'Limitler:\n'
+                                'Dosya: {files}\n'
+                                'Konu: {topics}\n'
+                                '\n'
+                                'Devam etmek icin `Odeme yap` dugmesine basin.'},
+ 'kk': {'btn_referral': 'Referral bonusy',
+        'btn_channel_bonus': 'Kanal bonusy',
+        'btn_bonuses': 'Bonustar',
+        'btn_admin_users': 'Paidalanushy statistikasy',
+        'btn_back': 'Artqa',
+        'menu_help': 'Menu bolimderi:\n'
+                     '- Fail zhykteu: test quru ushin fail nemese elektron kitaptı zhyktei alasiz.\n'
+                     '- Taqyryp boiynsha test: taqyrypty jazyp, kurdelilik, san zhane uaqytty tandap test qurasiz.\n'
+                     '- Zhana test: suraqtardy qoldan kirgizip test qurasiz.\n'
+                     '- Interfeis tili: bot interfeisinin tilin ozgerte alasiz.\n'
+                     '- Premium: limitterdi artirip, premium ala alasiz.\n'
+                     '- Bonustar: bonus bolimine ote alasiz.',
+        'bonuses_menu_text': 'Bonus bolimi.\n'
+                             '- Referral bonusy: siltemeniz arqyly dostarynyzdy shaqyrynyz.\n'
+                             '- Kanal bonusy: kanalga zhazylyp, +1 fail zhane +1 taqyryp testi alanyz.',
+        'topic_prompt': 'Qai taqyryp boiynsha test quraiyn?\nTaqyrypty zhazynyz.\nMysal: `Alemdik astanalar`',
+        'file_topic_prompt': 'Zhyktelgen fail ishinen qai taqyrypqa nazar audaraiyn? (mindetti emes)\n'
+                             'Taqyrypty zhazynyz.\n'
+                             'Mysal: `Alemdik astanalar`',
+        'need_translation': 'Audarma kerek pe?',
+        'shuffle_strategy_prompt': 'Kezdeisoq rettі qalai qoldanaiyq?',
+        'choose_translation_lang': 'Qai tilge audaraiyn?',
+        'pages_prompt': 'Qai better aralygyn paidalanaiyn? (1..{total})\nMysal: `20-30` nemese `20`',
+        'manual_has_image': 'Suraqqa suret bar ma? Zhiberiniz nemese /skip zhazynyz.',
+        'manual_draft_found': 'Saqlangan qoldan zhasalgan test nobaiy bar. Zhalgastıraiıq pa?',
+        'premium_status_free': 'Tegin zhospar (bir rettik):\n'
+                               'Fail limiti: {f_left}/{f_total}\n'
+                               'Taqyryp limiti: {t_left}/{t_total}\n'
+                               'Merzimi: {days} kun (ayaqtalady: {until})',
+        'premium_status_premium': 'Premium zhospar belsendi.\n'
+                                  'Merzimi: {until}\n'
+                                  'Fail limiti: {f_left}/{f_total}\n'
+                                  'Taqyryp limiti: {t_left}/{t_total}',
+        'premium_plan_1d': '1 kun',
+        'premium_plan_7d': '7 kun',
+        'premium_plan_30d': '1 ai',
+        'premium_plan_details': 'Tandalgan tarif: {plan}\n'
+                                'Merzimi: {days} kun\n'
+                                'Bagasy: {price} UZS\n'
+                                'Zhenildik: -{disc}%\n'
+                                '\n'
+                                'Limitter:\n'
+                                'Fail: {files}\n'
+                                'Taqyryp: {topics}\n'
+                                '\n'
+                                'Zhalgastıru ushin `Tolem zhasau` tumesin basynyz.'},
+ 'ar': {'btn_referral': 'مكافأة الإحالة',
+        'btn_channel_bonus': 'مكافأة القناة',
+        'btn_bonuses': 'المكافآت',
+        'btn_admin_users': 'إحصاءات المستخدمين',
+        'btn_back': 'رجوع'},
+ 'zh': {'btn_referral': '邀请奖励',
+        'btn_channel_bonus': '频道奖励',
+        'btn_bonuses': '奖励',
+        'btn_admin_users': '用户统计',
+        'btn_back': '返回'},
+ 'ko': {'btn_referral': '추천 보너스',
+        'btn_channel_bonus': '채널 보너스',
+        'btn_bonuses': '보너스',
+        'btn_admin_users': '사용자 통계',
+        'btn_back': '뒤로'}}
+
+
+def _apply_final_clean_overrides() -> None:
+    for code, data in _FINAL_CLEAN_OVERRIDES.items():
+        _STRINGS.setdefault(code, {}).update(data)
+
+
+_apply_final_clean_overrides()
+
+
+
+
+_FINAL_CLEAN_EXTRA: Dict[str, Dict[str, str]] = {'de': {'premium_choose_plan': 'Bitte wahlen Sie einen Premium-Tarif:'},
+ 'tr': {'premium_choose_plan': 'Lutfen bir Premium plan secin:'},
+ 'kk': {'premium_choose_plan': 'Premium zhosparlardyn birin tandanyz:'},
+ 'ar': {'menu_help': 'أقسام القائمة:\n'
+                     '- رفع ملف: أرسل ملفًا أو كتابًا إلكترونيًا لإنشاء اختبار.\n'
+                     '- اختبار حسب الموضوع: اكتب الموضوع واختر الصعوبة والعدد والوقت.\n'
+                     '- اختبار جديد: أنشئ اختبارًا يدويًا.\n'
+                     '- لغة الواجهة: غيّر لغة أزرار ورسائل البوت.\n'
+                     '- بريميوم: زد الحدود واحصل على بريميوم.\n'
+                     '- المكافآت: افتح قسم المكافآت.',
+        'bonuses_menu_text': 'قسم المكافآت.\n'
+                             '- مكافأة الإحالة: ادعُ أصدقاءك عبر رابط الإحالة الخاص بك.\n'
+                             '- مكافأة القناة: اشترك في القناة واحصل على +1 ملف و +1 اختبار حسب الموضوع.',
+        'premium_choose_plan': 'يرجى اختيار إحدى باقات بريميوم:',
+        'premium_status_free': 'الخطة المجانية (مرة واحدة):\n'
+                               'حد الملفات: {f_left}/{f_total}\n'
+                               'حد المواضيع: {t_left}/{t_total}\n'
+                               'المدة: {days} يوم (ينتهي في: {until})',
+        'premium_status_premium': 'خطة بريميوم مفعلة.\n'
+                                  'صالحة حتى: {until}\n'
+                                  'حد الملفات: {f_left}/{f_total}\n'
+                                  'حد المواضيع: {t_left}/{t_total}',
+        'premium_plan_1d': 'يوم واحد',
+        'premium_plan_7d': '7 أيام',
+        'premium_plan_30d': 'شهر واحد',
+        'premium_plan_details': 'الخطة المختارة: {plan}\n'
+                                'المدة: {days} يوم\n'
+                                'السعر: {price} UZS\n'
+                                'الخصم: -{disc}%\n'
+                                '\n'
+                                'الحدود:\n'
+                                'الملفات: {files}\n'
+                                'المواضيع: {topics}\n'
+                                '\n'
+                                'اضغط `الدفع` للمتابعة.'},
+ 'zh': {'menu_help': '菜单栏目：\n'
+                     '- 上传文件：发送文件或电子书来生成测试。\n'
+                     '- 按主题测试：输入主题并选择难度、数量和时间。\n'
+                     '- 新建测试：手动创建测试。\n'
+                     '- 界面语言：更改机器人按钮和消息语言。\n'
+                     '- 高级版：提高额度并开通高级版。\n'
+                     '- 奖励：打开奖励栏目。',
+        'bonuses_menu_text': '奖励栏目。\n- 邀请奖励：通过你的邀请链接邀请朋友。\n- 频道奖励：加入频道后可获得 +1 文件和 +1 主题测试。',
+        'premium_choose_plan': '请选择一个高级版套餐：',
+        'premium_status_free': '免费套餐（一次性）：\n文件额度：{f_left}/{f_total}\n主题额度：{t_left}/{t_total}\n有效期：{days} 天（到期：{until}）',
+        'premium_status_premium': '高级版套餐已开通。\n有效期至：{until}\n文件额度：{f_left}/{f_total}\n主题额度：{t_left}/{t_total}',
+        'premium_plan_1d': '1 天',
+        'premium_plan_7d': '7 天',
+        'premium_plan_30d': '1 个月',
+        'premium_plan_details': '所选套餐：{plan}\n'
+                                '时长：{days} 天\n'
+                                '价格：{price} UZS\n'
+                                '折扣：-{disc}%\n'
+                                '\n'
+                                '额度：\n'
+                                '文件：{files}\n'
+                                '主题：{topics}\n'
+                                '\n'
+                                '点击 `支付` 继续。'},
+ 'ko': {'menu_help': '메뉴 섹션:\n'
+                     '- 파일 업로드: 파일이나 전자책을 보내 테스트를 만들 수 있습니다.\n'
+                     '- 주제별 테스트: 주제를 입력하고 난이도, 문제 수, 시간을 선택하세요.\n'
+                     '- 새 테스트: 테스트를 수동으로 만들 수 있습니다.\n'
+                     '- 인터페이스 언어: 봇의 버튼과 메시지 언어를 변경할 수 있습니다.\n'
+                     '- 프리미엄: 한도를 늘리고 프리미엄을 이용하세요.\n'
+                     '- 보너스: 보너스 섹션을 여세요.',
+        'bonuses_menu_text': '보너스 섹션입니다.\n- 추천 보너스: 추천 링크로 친구를 초대하세요.\n- 채널 보너스: 채널에 가입하면 +1 파일과 +1 주제 테스트를 받을 수 있습니다.',
+        'premium_choose_plan': '프리미엄 요금제 중 하나를 선택하세요:',
+        'premium_status_free': '무료 요금제(1회):\n'
+                               '파일 한도: {f_left}/{f_total}\n'
+                               '주제 한도: {t_left}/{t_total}\n'
+                               '유효 기간: {days}일 (만료: {until})',
+        'premium_status_premium': '프리미엄 요금제가 활성화되었습니다.\n'
+                                  '유효 기간: {until}\n'
+                                  '파일 한도: {f_left}/{f_total}\n'
+                                  '주제 한도: {t_left}/{t_total}',
+        'premium_plan_1d': '1일',
+        'premium_plan_7d': '7일',
+        'premium_plan_30d': '1개월',
+        'premium_plan_details': '선택한 요금제: {plan}\n'
+                                '기간: {days}일\n'
+                                '가격: {price} UZS\n'
+                                '할인: -{disc}%\n'
+                                '\n'
+                                '한도:\n'
+                                '파일: {files}\n'
+                                '주제: {topics}\n'
+                                '\n'
+                                '계속하려면 `결제하기`를 누르세요.'}}
+
+for _code, _data in _FINAL_CLEAN_EXTRA.items():
+    _STRINGS.setdefault(_code, {}).update(_data)
+
+
+_FINAL_RUNTIME_FIXES: Dict[str, Dict[str, str]] = {
+    "uz": {
+        "btn_back": "Orqaga",
+        "btn_stats": "📊 Statistika",
+        "btn_prev_page": "⬅️ Oldingi",
+        "btn_next_page": "Keyingi ➡️",
+        "btn_open_private": "Botga o'tish",
+        "private_only_group": "Bu buyruqni bot bilan shaxsiy chatda bajaring.",
+        "group_stop_owner_only": "Kechirasiz, testni faqatgina testni boshlagan kishi to'xtatishi mumkin.",
+    },
+    "ru": {
+        "btn_back": "Назад",
+        "btn_stats": "📊 Статистика",
+        "btn_prev_page": "⬅️ Назад",
+        "btn_next_page": "Далее ➡️",
+        "btn_open_private": "Открыть бота",
+        "private_only_group": "Пожалуйста, используйте эту команду в личном чате с ботом.",
+        "group_stop_owner_only": "Извините, остановить тест может только тот, кто его запустил.",
+        "lobby_creator_only": "Только создатель теста может выполнить это действие.",
+        "group_started_status": "\u0422\u0435\u0441\u0442 \u043d\u0430\u0447\u0430\u043b\u0441\u044f: {count} \u0432\u043e\u043f\u0440\u043e\u0441\u043e\u0432, \u043f\u043e {sec}s \u043a\u0430\u0436\u0434\u044b\u0439 (\u043f\u0440\u0438\u043c\u0435\u0440\u043d\u043e {est}).\n\u0423\u0447\u0430\u0441\u0442\u043d\u0438\u043a\u043e\u0432: {n}.\n\u0423\u0441\u043a\u043e\u0440\u0438\u0442\u044c: \u0414\u0430\u043b\u0435\u0435 (\u0442\u043e\u043b\u044c\u043a\u043e \u0430\u0432\u0442\u043e\u0440). \u041e\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c: /cancel",
+        "quiz_finished": "Тест завершён.",
+        "quiz_stopped_no_participants": "Все участники пропустили 3 вопроса. Тест остановлен.",
+        "stats_title": "Статистика: {title}",
+        "stats_creator_only": "Статистику может смотреть только владелец теста.",
+        "scoreboard_title": "Результаты:",
+        "participants_joined": "Участники: {n}",
+        "scoreboard_more": "... ещё {n} пользователей",
+        "scoreboard_row": "{i}) {name}: {correct}/{answered} верно, время {t}s, среднее {avg}s{extra}",
+        "stopped": "Тест остановлен.",
+        "stopped_n": "Остановлено активных тестов: {n}.",
+    },
+    "en": {
+        "btn_back": "Back",
+        "btn_stats": "📊 Statistics",
+        "btn_prev_page": "⬅️ Prev",
+        "btn_next_page": "Next ➡️",
+        "btn_open_private": "Open bot",
+        "private_only_group": "Please use this command in the bot's private chat.",
+        "group_stop_owner_only": "Sorry, only the person who started the quiz can stop it.",
+    },
+    "de": {
+        "btn_back": "Zuruck",
+        "btn_stats": "📊 Statistik",
+        "btn_prev_page": "⬅️ Zuruck",
+        "btn_next_page": "Weiter ➡️",
+        "btn_open_private": "Bot privat offnen",
+        "private_only_group": "Bitte nutzen Sie diesen Befehl im privaten Chat mit dem Bot.",
+        "group_stop_owner_only": "Entschuldigung, nur die Person, die den Test gestartet hat, kann ihn stoppen.",
+    },
+    "tr": {
+        "btn_back": "Geri",
+        "btn_stats": "📊 Istatistik",
+        "btn_prev_page": "⬅️ Onceki",
+        "btn_next_page": "Sonraki ➡️",
+        "btn_open_private": "Botu ac",
+        "private_only_group": "Lutfen bu komutu botun ozel sohbetinde kullanin.",
+        "group_stop_owner_only": "Uzgunuz, testi yalnizca testi baslatan kisi durdurabilir.",
+    },
+    "kk": {
+        "btn_back": "Artqa",
+        "btn_stats": "📊 Statistika",
+        "btn_prev_page": "⬅️ Aldyngy",
+        "btn_next_page": "Kelesi ➡️",
+        "btn_open_private": "Botty ashu",
+        "private_only_group": "Bul buiryqty botpen zheke chatta oryndanyz.",
+        "group_stop_owner_only": "Keshiriniz, testti tek testti bastagan adam gana toqtata alady.",
+    },
+    "ar": {
+        "btn_back": "رجوع",
+        "btn_stats": "📊 الإحصاءات",
+        "btn_prev_page": "⬅️ السابق",
+        "btn_next_page": "التالي ➡️",
+        "btn_open_private": "فتح البوت",
+        "private_only_group": "يرجى استخدام هذا الأمر في المحادثة الخاصة مع البوت.",
+        "group_stop_owner_only": "عذرًا، لا يمكن إيقاف الاختبار إلا من قبل الشخص الذي بدأه.",
+    },
+    "zh": {
+        "btn_back": "返回",
+        "btn_stats": "📊 统计",
+        "btn_prev_page": "⬅️ 上一页",
+        "btn_next_page": "下一页 ➡️",
+        "btn_open_private": "打开机器人",
+        "private_only_group": "请在与机器人的私聊中使用此命令。",
+        "group_stop_owner_only": "抱歉，只有开始测试的人才能停止它。",
+    },
+    "ko": {
+        "btn_back": "뒤로",
+        "btn_stats": "📊 통계",
+        "btn_prev_page": "⬅️ 이전",
+        "btn_next_page": "다음 ➡️",
+        "btn_open_private": "봇 열기",
+        "private_only_group": "이 명령은 봇과의 개인 채팅에서 사용해 주세요.",
+        "group_stop_owner_only": "죄송하지만 테스트를 시작한 사람만 중지할 수 있습니다.",
+    },
+}
+
+for _code, _data in _FINAL_RUNTIME_FIXES.items():
+    _STRINGS.setdefault(_code, {}).update(_data)
+
+
 def norm_ui_lang(lang: str) -> str:
     x = (lang or "").strip().lower()
     if x in SUPPORTED_UI_LANGS:
@@ -1995,21 +2471,21 @@ def lang_name(code: str) -> str:
     if c == "uz":
         return "O'zbek"
     if c == "ru":
-        return "Rus"
+        return "\u0420\u0443\u0441\u0441\u043a\u0438\u0439"
     if c == "en":
-        return "Ingliz"
+        return "English"
     if c == "de":
-        return "Nemis"
+        return "Deutsch"
     if c == "tr":
-        return "Turk"
+        return "T\u00fcrk\u00e7e"
     if c == "kk":
-        return "Qozoq"
+        return "\u049a\u0430\u0437\u0430\u049b\u0448\u0430"
     if c == "ar":
-        return "Arab"
+        return "\u0627\u0644\u0639\u0631\u0628\u064a\u0629"
     if c == "zh":
-        return "Xitoy"
+        return "\u4e2d\u6587"
     if c == "ko":
-        return "Koreys"
+        return "\ud55c\uad6d\uc5b4"
     return c or "uz"
 
 

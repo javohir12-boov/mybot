@@ -1399,7 +1399,11 @@ def _kb_required_channel(ui_lang: str) -> types.InlineKeyboardMarkup:
     return kb.as_markup()
 
 async def _is_user_subscribed(bot: Bot, user_id: int) -> bool:
-    if not _subscription_gate_enabled():
+    return await _is_user_subscribed_required_channel(bot, user_id, respect_gate=True)
+
+
+async def _is_user_subscribed_required_channel(bot: Bot, user_id: int, *, respect_gate: bool = True) -> bool:
+    if respect_gate and not _subscription_gate_enabled():
         return True
     ch = str(REQUIRED_CHANNEL or "").strip()
     if not ch:
@@ -1410,6 +1414,17 @@ async def _is_user_subscribed(bot: Bot, user_id: int) -> bool:
         return status in {"creator", "administrator", "member"}
     except Exception:
         return False
+
+
+def _has_foreign_active_run(chat_id: int, user_id: int) -> bool:
+    for run in list(_ACTIVE_RUNS.values()):
+        if int(run.chat_id) != int(chat_id):
+            continue
+        if run.cancelled:
+            continue
+        if int(run.created_by) != int(user_id):
+            return True
+    return False
 
 async def _ensure_subscribed(event: object, bot: Bot, user_id: int, *, pending_action: str = "") -> bool:
     user_id = int(user_id or 0)
@@ -2735,7 +2750,7 @@ async def _send_channel_bonus_result(call: types.CallbackQuery, bot: Bot) -> Non
         if call.message:
             await call.message.answer(t(ui_lang, 'channel_bonus_unavailable'))
         return
-    if not await _is_user_subscribed(bot, call.from_user.id if call.from_user else 0):
+    if not await _is_user_subscribed_required_channel(bot, call.from_user.id if call.from_user else 0, respect_gate=False):
         await call.answer(t(ui_lang, 'channel_bonus_check_fail'), show_alert=True)
         if call.message:
             await call.message.answer(
@@ -3556,6 +3571,10 @@ async def menu_cancel(call: types.CallbackQuery, state: FSMContext, bot: Bot) ->
     await call.answer()
     chat_id = call.message.chat.id if call.message else 0
     cancelled = await _cancel_user_runs(bot, chat_id=chat_id, user_id=call.from_user.id)
+    if cancelled == 0 and _has_foreign_active_run(chat_id, call.from_user.id):
+        if call.message:
+            await call.message.answer(t(ui_lang, "group_stop_owner_only"))
+        return
     await state.clear()
     await clear_manual_quiz_draft(user_id=call.from_user.id)
     if call.message:
@@ -4244,6 +4263,10 @@ async def cmd_cancel(message: types.Message, state: FSMContext, bot: Bot) -> Non
         return
     user_id = message.from_user.id if message.from_user else 0
     cancelled = await _cancel_user_runs(bot, chat_id=message.chat.id, user_id=user_id)
+    if cancelled == 0 and _has_foreign_active_run(message.chat.id, user_id):
+        ui_lang = await _get_ui_lang(user_id)
+        await message.answer(t(ui_lang, "group_stop_owner_only"))
+        return
     await state.clear()
     await clear_manual_quiz_draft(user_id=user_id)
     ui_lang = await _get_ui_lang(user_id)

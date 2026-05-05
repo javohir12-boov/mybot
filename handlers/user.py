@@ -5,6 +5,7 @@ import os
 import random
 import re
 import shutil
+import subprocess
 import time
 import uuid
 from contextlib import suppress
@@ -113,10 +114,13 @@ _POLL_CTX: Dict[str, "PollContext"] = {}
 _BOT_USERNAME: Optional[str] = None
 _UI_LANG_CACHE: Dict[int, tuple[str, float]] = {}
 _UI_LANG_TTL_SEC = 600.0
+_UI_LANG_CACHE_MAX = 60_000
 _PAUSED_RUNS: Dict[str, "PausedRun"] = {}
 _PAUSED_RUNS_TTL_SEC = 24 * 60 * 60  # best-effort, in-memory only
 _PENDING_AFTER_SUB: Dict[int, str] = {}
+_PENDING_AFTER_SUB_MAX = 20_000
 _MANUAL_CORRECT_LOCKS: Dict[int, asyncio.Lock] = {}
+_MANUAL_CORRECT_LOCKS_MAX = 10_000
 _START_LANG_PROMPT = "рџЊђ Interfeys tili / Interface language / РЇР·С‹Рє РёРЅС‚РµСЂС„РµР№СЃР°"
 
 
@@ -160,6 +164,13 @@ def _manual_correct_lock(user_id: int) -> asyncio.Lock:
     user_id = int(user_id or 0)
     lock = _MANUAL_CORRECT_LOCKS.get(user_id)
     if lock is None:
+        if len(_MANUAL_CORRECT_LOCKS) >= _MANUAL_CORRECT_LOCKS_MAX:
+            # Evict entries whose lock is not currently held to free memory.
+            for k, lk in list(_MANUAL_CORRECT_LOCKS.items()):
+                if not lk.locked():
+                    del _MANUAL_CORRECT_LOCKS[k]
+                    if len(_MANUAL_CORRECT_LOCKS) < _MANUAL_CORRECT_LOCKS_MAX:
+                        break
         lock = asyncio.Lock()
         _MANUAL_CORRECT_LOCKS[user_id] = lock
     return lock
@@ -174,6 +185,16 @@ async def _get_ui_lang(user_id: int) -> str:
         return norm_ui_lang(cached[0])
     settings = await get_or_create_user_settings(user_id=int(user_id))
     lang = norm_ui_lang(str(settings.get("ui_lang") or "uz"))
+    if len(_UI_LANG_CACHE) >= _UI_LANG_CACHE_MAX:
+        # Evict expired entries first, then oldest if still too large.
+        cutoff = now - _UI_LANG_TTL_SEC
+        expired = [k for k, v in _UI_LANG_CACHE.items() if float(v[1]) < cutoff]
+        for k in expired:
+            _UI_LANG_CACHE.pop(k, None)
+        if len(_UI_LANG_CACHE) >= _UI_LANG_CACHE_MAX:
+            oldest = sorted(_UI_LANG_CACHE.items(), key=lambda kv: kv[1][1])
+            for k, _ in oldest[: len(_UI_LANG_CACHE) - _UI_LANG_CACHE_MAX + 1]:
+                _UI_LANG_CACHE.pop(k, None)
     _UI_LANG_CACHE[int(user_id)] = (lang, now)
     return lang
 
@@ -189,6 +210,11 @@ def _set_pending_after_sub(user_id: int, action: str) -> None:
         return
     action = str(action or "").strip()
     if action:
+        if len(_PENDING_AFTER_SUB) >= _PENDING_AFTER_SUB_MAX:
+            # Drop oldest half to stay within limit.
+            to_drop = list(_PENDING_AFTER_SUB.keys())[: _PENDING_AFTER_SUB_MAX // 2]
+            for k in to_drop:
+                _PENDING_AFTER_SUB.pop(k, None)
         _PENDING_AFTER_SUB[int(user_id)] = action
 
 
@@ -237,6 +263,22 @@ def _format_ai_error_text(ui_lang: str, exc: Exception) -> str:
     if err == FRIENDLY_TOO_MANY_QUESTIONS:
         return t(ui_lang, "err_too_many_questions")
     return t(ui_lang, "err_ai", err=err or t(ui_lang, "error_short"))
+
+
+def _file_type_only_message(ui_lang: str) -> str:
+    note_map = {
+        "uz": "Iltimos, fayl formatini o'zgartirib qayta yuboring.",
+        "ru": "Пожалуйста, измените формат файла и отправьте его снова.",
+        "en": "Please change the file format and send it again.",
+        "de": "Bitte ändern Sie das Dateiformat und senden Sie die Datei erneut.",
+        "tr": "Lütfen dosya formatını değiştirip tekrar gönderin.",
+        "kk": "Файл пішімін өзгертіп, қайта жіберіңіз.",
+        "ar": "يرجى تغيير صيغة الملف وإرساله مرة أخرى.",
+        "zh": "请先更改文件格式后重新发送。",
+        "ko": "파일 형식을 변경한 뒤 다시 보내 주세요.",
+    }
+    lang = norm_ui_lang(ui_lang)
+    return f"{t(lang, 'file_type_only')}\n\n{note_map.get(lang, note_map['en'])}"
 
 
 @dataclass
@@ -584,6 +626,196 @@ def _pdf_page_count(pdf_path: Path) -> int:
         raise RuntimeError("PyMuPDF (fitz) kerak. O'rnatish: pip install PyMuPDF") from exc
     with fitz.open(str(pdf_path)) as doc:
         return int(getattr(doc, "page_count", 0) or 0)
+
+
+def _docx_page_count(docx_path: Path) -> int:
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    try:
+        with zipfile.ZipFile(str(docx_path)) as z:
+            try:
+                app_root = ET.fromstring(z.read("docProps/app.xml"))
+                pages_node = app_root.find(".//Pages")
+                if pages_node is None:
+                    pages_node = app_root.find(".//{*}Pages")
+                if pages_node is not None:
+                    pages_val = int(str(pages_node.text or "0").strip() or 0)
+                    if pages_val > 0:
+                        return pages_val
+            except Exception:
+                pass
+            root = ET.fromstring(z.read("word/document.xml"))
+        count = 1
+        for el in root.iter():
+            tag = str(el.tag or "")
+            if tag.endswith("}lastRenderedPageBreak"):
+                count += 1
+                continue
+            if tag.endswith("}br") and str(el.attrib.get(f"{{{ns['w']}}}type", "") or "").lower() == "page":
+                count += 1
+        return max(1, count)
+    except Exception:
+        return 1
+
+
+def _extract_docx_text_range(docx_path: Path, page_from: int, page_to: int, *, char_limit: int = 200000) -> str:
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    s_from = max(1, int(page_from or 1))
+    s_to = max(s_from, int(page_to or s_from))
+
+    try:
+        with zipfile.ZipFile(str(docx_path)) as z:
+            root = ET.fromstring(z.read("word/document.xml"))
+    except Exception:
+        return ""
+
+    estimated_pages = max(1, _docx_page_count(docx_path))
+    pages = [[]]
+
+    def _new_page() -> None:
+        pages.append([])
+
+    for node in root.iter():
+        tag = str(node.tag or "")
+        if tag.endswith("}t") and node.text:
+            pages[-1].append(str(node.text))
+            continue
+        if tag.endswith("}tab"):
+            pages[-1].append("\t")
+            continue
+        if tag.endswith("}br"):
+            btype = str(node.attrib.get(f"{{{ns['w']}}}type", "") or "").lower()
+            if btype == "page":
+                _new_page()
+            else:
+                pages[-1].append("\n")
+            continue
+        if tag.endswith("}lastRenderedPageBreak"):
+            _new_page()
+            continue
+        if tag.endswith("}p"):
+            pages[-1].append("\n")
+
+    if len(pages) <= 1 and estimated_pages > 1:
+        full_text = "".join(pages[0]).strip()
+        paragraphs = [part.strip() for part in re.split(r"\n+", full_text) if part.strip()]
+        if paragraphs:
+            per_page = max(1, math.ceil(len(paragraphs) / estimated_pages))
+            approx_pages: List[List[str]] = []
+            for idx in range(0, len(paragraphs), per_page):
+                approx_pages.append([paragraphs[idx2] + "\n" for idx2 in range(idx, min(len(paragraphs), idx + per_page))])
+            while len(approx_pages) < estimated_pages:
+                approx_pages.append([])
+            pages = approx_pages
+
+    selected = pages[s_from - 1 : s_to]
+    text_out = "\n".join("".join(chunk).strip() for chunk in selected if "".join(chunk).strip())
+    return text_out[:char_limit]
+def _xlsx_sheet_count(xlsx_path: Path) -> int:
+    try:
+        from openpyxl import load_workbook
+
+        wb = load_workbook(str(xlsx_path), read_only=True, data_only=True)
+        try:
+            return max(1, len(list(wb.worksheets)))
+        finally:
+            wb.close()
+    except Exception:
+        import zipfile
+        import xml.etree.ElementTree as ET
+
+        try:
+            with zipfile.ZipFile(str(xlsx_path)) as z:
+                root = ET.fromstring(z.read("xl/workbook.xml"))
+            ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+            sheets = root.findall(".//main:sheets/main:sheet", ns)
+            return max(1, len(sheets))
+        except Exception:
+            return 1
+
+
+def _extract_xlsx_text_range(xlsx_path: Path, sheet_from: int, sheet_to: int, *, char_limit: int = 200000) -> str:
+    def _cell_text(value: Any) -> str:
+        if value is None:
+            return ""
+        s = str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+        s = re.sub(r"\s*\n\s*", " ", s)
+        return re.sub(r"\s+", " ", s).strip()
+
+    s_from = max(1, int(sheet_from or 1))
+    s_to = max(s_from, int(sheet_to or s_from))
+
+    try:
+        from openpyxl import load_workbook
+
+        wb = load_workbook(str(xlsx_path), read_only=True, data_only=True)
+        lines: List[str] = []
+        total = 0
+        try:
+            for idx, ws in enumerate(wb.worksheets, start=1):
+                if idx < s_from or idx > s_to:
+                    continue
+                lines.append(f"# Sheet: {ws.title}")
+                for row in ws.iter_rows(values_only=True):
+                    cells = [_cell_text(v) for v in row]
+                    if not any(cells):
+                        continue
+                    line = "\t".join(cells).strip()
+                    if not line:
+                        continue
+                    lines.append(line)
+                    total += len(line) + 1
+                    if total >= char_limit:
+                        return "\n".join(lines)[:char_limit]
+        finally:
+            wb.close()
+        return "\n".join(lines)[:char_limit]
+    except Exception as exc:
+        raise AIServiceError(f"XLSX varaq matnini ajratib bo'lmadi: {exc}") from exc
+
+
+def _convert_doc_to_docx(doc_path: Path) -> Path:
+    out_dir = _DOWNLOAD_DIR / f"conv_{uuid.uuid4().hex}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target = out_dir / f"{doc_path.stem}.docx"
+
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if soffice:
+        try:
+            subprocess.run(
+                [soffice, "--headless", "--convert-to", "docx", "--outdir", str(out_dir), str(doc_path)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=180,
+            )
+            if target.exists():
+                return target
+        except Exception:
+            pass
+
+    try:
+        import win32com.client  # type: ignore
+
+        word = win32com.client.Dispatch("Word.Application")
+        word.Visible = False
+        doc = word.Documents.Open(str(doc_path))
+        try:
+            doc.SaveAs(str(target), FileFormat=16)
+        finally:
+            doc.Close(False)
+            word.Quit()
+        if target.exists():
+            return target
+    except Exception:
+        pass
+
+    raise AIServiceError(".doc faylni ochib bo'lmadi. Uni .docx ga saqlab yuboring yoki serverga LibreOffice/Word converter o'rnating.")
 
 
 def _pptx_slide_count(pptx_path: Path) -> int:
@@ -4873,6 +5105,8 @@ async def ai_cancel(call: types.CallbackQuery, state: FSMContext) -> None:
     image_paths = list(data.get("ai_image_paths") or [])
     pdf_path = str(data.get("ai_pdf_path") or "").strip()
     pptx_path = str(data.get("ai_pptx_path") or "").strip()
+    docx_path = str(data.get("ai_docx_path") or "").strip()
+    xlsx_path = str(data.get("ai_xlsx_path") or "").strip()
     text_path = str(data.get("ai_text_path") or "").strip()
     await call.answer()
     await state.clear()
@@ -4900,6 +5134,26 @@ async def ai_cancel(call: types.CallbackQuery, state: FSMContext) -> None:
             pp = Path(pdf_path)
             if _is_under_dir(pp, _DOWNLOAD_DIR) and pp.exists():
                 pp.unlink(missing_ok=True)
+        except Exception:
+            pass
+    # Cleanup temporary uploaded XLSX (file-mode only), only under downloads/.
+    if xlsx_path:
+        try:
+            pp = Path(xlsx_path)
+            if _is_under_dir(pp, _DOWNLOAD_DIR) and pp.exists():
+                pp.unlink(missing_ok=True)
+        except Exception:
+            pass
+    # Cleanup temporary uploaded DOCX (file-mode only), only under downloads/.
+    if docx_path:
+        try:
+            pp = Path(docx_path)
+            if _is_under_dir(pp, _DOWNLOAD_DIR) and pp.exists():
+                if pp.is_file():
+                    pp.unlink(missing_ok=True)
+                parent = pp.parent
+                if parent.name.startswith("conv_") and parent.exists() and not any(parent.iterdir()):
+                    shutil.rmtree(parent, ignore_errors=True)
         except Exception:
             pass
     # Cleanup temporary uploaded PPTX (file-mode only), only under downloads/.
@@ -5889,6 +6143,8 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
     chat_type = str(data.get("ai_chat_type") or "private").strip().lower()
     pdf_path = str(data.get("ai_pdf_path") or "").strip()
     pptx_path = str(data.get("ai_pptx_path") or "").strip()
+    docx_path = str(data.get("ai_docx_path") or "").strip()
+    xlsx_path = str(data.get("ai_xlsx_path") or "").strip()
     page_from = int(data.get("ai_page_from") or 0)
     page_to = int(data.get("ai_page_to") or 0)
 
@@ -5909,7 +6165,7 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
         else:
             image_paths = []
 
-    if not text and not image_paths and not topic and not pdf_path and not pptx_path:
+    if not text and not image_paths and not topic and not pdf_path and not pptx_path and not docx_path and not xlsx_path:
         await state.clear()
         await bot.send_message(chat_id, t(ui_lang, "no_input_for_ai"))
         return
@@ -5942,6 +6198,7 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
     quiz_id: Optional[int] = None
     imported_ready = False
     used_ai_generation = False
+    review_source_text = ""
     try:
         use_paths: List[str] = []
         if image_paths:
@@ -5951,10 +6208,104 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
             questions = await ai_service.generate_quiz_from_images(use_paths, output_language=output_language, shuffle_options=generation_shuffle_options)
             for q, p in zip(questions, use_paths):
                 q["image_path"] = p
-        elif pdf_path or pptx_path:
-            # File-mode PDF/PPTX: extract ONLY selected pages/slides, then generate. If no text, fall back to vision.
+        elif pdf_path or pptx_path or docx_path or xlsx_path:
+            # File-mode PDF/PPTX/DOCX/XLSX: extract only selected pages/slides/sheets, then generate.
             use_text = ""
-            if pptx_path:
+            if xlsx_path:
+                try:
+                    use_text = await asyncio.to_thread(
+                        _extract_xlsx_text_range,
+                        Path(xlsx_path),
+                        page_from,
+                        page_to,
+                        char_limit=int(os.getenv("EXTRACT_CHAR_LIMIT", "200000")),
+                    )
+                except Exception as exc:
+                    raise AIServiceError(f"XLSX varaqlaridan matn ajratib bo'lmadi: {exc}") from exc
+
+                try:
+                    parsed_title, ready_questions = parse_quiz_payload(use_text, title_fallback=title)
+                except Exception:
+                    parsed_title, ready_questions = ("", [])
+                if ready_questions:
+                    imported_ready = True
+                    if parsed_title:
+                        title = parsed_title.strip()[:120]
+                    questions = ready_questions
+                elif len(use_text.strip()) < 20:
+                    raise AIServiceError("Tanlangan XLSX varaqlarida yetarli matn topilmadi.")
+                else:
+                    used_ai_generation = True
+                    questions = await ai_service.generate_quiz_from_text(
+                        use_text,
+                        question_count=question_count,
+                        output_language=output_language,
+                        difficulty=difficulty,
+                        focus_topic=topic,
+                        shuffle_options=generation_shuffle_options,
+                    )
+
+                if use_text.strip():
+                    review_source_text = use_text
+                    questions, topped_up = await _fill_questions_from_text(
+                        existing=questions,
+                        source_text=use_text,
+                        question_count=question_count,
+                        output_language=output_language,
+                        difficulty=difficulty,
+                        focus_topic=topic,
+                        allow_generate=AI_ENABLED,
+                        shuffle_options=generation_shuffle_options,
+                    )
+                    used_ai_generation = used_ai_generation or topped_up
+            elif docx_path:
+                try:
+                    use_text = await asyncio.to_thread(
+                        _extract_docx_text_range,
+                        Path(docx_path),
+                        page_from,
+                        page_to,
+                        char_limit=int(os.getenv("EXTRACT_CHAR_LIMIT", "200000")),
+                    )
+                except Exception as exc:
+                    raise AIServiceError(f"DOCX sahifalaridan matn ajratib bo'lmadi: {exc}") from exc
+
+                try:
+                    parsed_title, ready_questions = parse_quiz_payload(use_text, title_fallback=title)
+                except Exception:
+                    parsed_title, ready_questions = ("", [])
+                if ready_questions:
+                    imported_ready = True
+                    if parsed_title:
+                        title = parsed_title.strip()[:120]
+                    questions = ready_questions
+                elif len(use_text.strip()) < 50:
+                    raise AIServiceError("Tanlangan DOCX sahifalarida yetarli matn topilmadi.")
+                else:
+                    used_ai_generation = True
+                    questions = await ai_service.generate_quiz_from_text(
+                        use_text,
+                        question_count=question_count,
+                        output_language=output_language,
+                        difficulty=difficulty,
+                        focus_topic=topic,
+                        shuffle_options=generation_shuffle_options,
+                    )
+
+                if use_text.strip():
+                    review_source_text = use_text
+                    questions, topped_up = await _fill_questions_from_text(
+                        existing=questions,
+                        source_text=use_text,
+                        question_count=question_count,
+                        output_language=output_language,
+                        difficulty=difficulty,
+                        focus_topic=topic,
+                        allow_generate=AI_ENABLED,
+                        shuffle_options=generation_shuffle_options,
+                    )
+                    used_ai_generation = used_ai_generation or topped_up
+            elif pptx_path:
                 try:
                     use_text = await asyncio.to_thread(
                         _extract_pptx_text_range,
@@ -6016,6 +6367,7 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                     )
 
                 if use_text.strip():
+                    review_source_text = use_text
                     questions, topped_up = await _fill_questions_from_text(
                         existing=questions,
                         source_text=use_text,
@@ -6093,6 +6445,7 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
                     )
 
                 if use_text.strip():
+                    review_source_text = use_text
                     questions, topped_up = await _fill_questions_from_text(
                         existing=questions,
                         source_text=use_text,
@@ -6175,6 +6528,17 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
 
         if question_count > 0 and len(questions) > int(question_count):
             questions = questions[: int(question_count)]
+
+        if review_source_text.strip() and used_ai_generation and not imported_ready:
+            try:
+                questions = await ai_service.review_quiz_answers(
+                    source_text=review_source_text,
+                    questions=questions,
+                    output_language=output_language,
+                    focus_topic=topic,
+                )
+            except Exception:
+                pass
 
         reservation = await reserve_user_quota(user.id, quota_kind)
 
@@ -6653,7 +7017,7 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
     file_name = doc.file_name or "file"
     suffix = Path(file_name).suffix.lower()
     if suffix not in _ALLOWED_SUFFIXES:
-        await message.answer(t(ui_lang, "file_type_only"))
+        await message.answer(_file_type_only_message(ui_lang))
         return
 
     max_mb = _max_upload_mb_for_suffix(suffix)
@@ -6721,7 +7085,7 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
                         title = (m.group(1) or "").strip()[:120]
                         break
 
-                m = re.search(r"(?i)\b(?:time|sec|sek|sekund|soniya)\s*[:\-]\s*(\d{1,3})\b", caption)
+                m = re.search(r"(?i)(?:time|sec|sek|sekund|soniya)\s*[:\-]\s*(\d{1,3})", caption)
                 if m and m.group(1).isdigit():
                     open_period = int(m.group(1))
                 else:
@@ -6730,13 +7094,7 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
                         open_period = int(m.group(1))
                 open_period = max(5, min(600, int(open_period or 30)))
 
-            await status.edit_text(t(ui_lang, "extracting_text"))
-            parsed_title, ready_questions = await asyncio.to_thread(parse_quiz_xlsx, str(local_path), title_fallback=title)
-            if not ready_questions:
-                raise AIServiceError(t(ui_lang, "import_failed"))
-
-            raw = json.dumps({"title": parsed_title or title, "quiz": ready_questions}, ensure_ascii=False)
-            raw_path = _save_temp_payload(raw, suffix=".json")
+            pages_total = await asyncio.to_thread(_xlsx_sheet_count, local_path)
             session_id = uuid.uuid4().hex
             await state.update_data(
                 ai_session_id=session_id,
@@ -6744,23 +7102,23 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
                 ai_difficulty="",
                 ai_ui_lang=ui_lang,
                 ai_text="",
-                ai_text_path=raw_path,
-                ai_title=(parsed_title or title)[:120],
+                ai_title=title[:120],
                 ai_open_period=open_period,
                 ai_chat_id=message.chat.id,
                 ai_chat_type=message.chat.type,
                 ai_user_id=message.from_user.id if message.from_user else 0,
-                ai_pages_total=1,
+                ai_pages_total=int(pages_total or 1),
                 ai_pages_return="count",
                 ai_pages_required=True,
-                ai_import_only=True,
-                ai_max_questions=max(1, min(50, len(ready_questions))),
+                ai_import_only=False,
+                ai_xlsx_path=str(local_path),
             )
             await state.set_state(AIQuizStates.choose_pages)
             await status.edit_text(
-                t(ui_lang, "pages_prompt", total=1),
-                reply_markup=_kb_page_presets(session_id, 1, ui_lang=ui_lang),
+                t(ui_lang, "pages_prompt", total=int(pages_total or 1)),
+                reply_markup=_kb_page_presets(session_id, int(pages_total or 1), ui_lang=ui_lang),
             )
+            cleanup_local = False
             return
 
         # Import mode: JSON is always treated as a ready quiz file.
@@ -6822,14 +7180,16 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
             elif len(caption) <= 120:
                 topic = caption
 
-        # PDF/PPTX: sahifa oralig'ini majburiy tanlatamiz, shunda butun faylni ajratib/tahlil qilib vaqt ketmaydi.
-        if suffix in {".pdf", ".pptx"}:
+        # PDF/PPTX/DOCX: sahifa/slayd oralig'ini majburiy tanlatamiz, shunda butun faylni ajratib/tahlil qilib vaqt ketmaydi.
+        if suffix in {".pdf", ".pptx", ".docx"}:
             pages_total = 0
             try:
                 if suffix == ".pdf":
                     pages_total = await asyncio.to_thread(_pdf_page_count, local_path)
-                else:
+                elif suffix == ".pptx":
                     pages_total = await asyncio.to_thread(_pptx_slide_count, local_path)
+                else:
+                    pages_total = await asyncio.to_thread(_docx_page_count, local_path)
             except Exception:
                 pages_total = 0
 
@@ -6852,8 +7212,10 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
             )
             if suffix == ".pdf":
                 data_out["ai_pdf_path"] = str(local_path)
-            else:
+            elif suffix == ".pptx":
                 data_out["ai_pptx_path"] = str(local_path)
+            else:
+                data_out["ai_docx_path"] = str(local_path)
 
             await state.update_data(**data_out)
             await state.set_state(AIQuizStates.choose_pages)

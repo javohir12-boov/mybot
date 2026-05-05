@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional
 
 from config import (
     AI_PROVIDER,
+    CLAUDE_API_KEY,
+    CLAUDE_MODEL,
     GEMINI_API_KEY,
     GEMINI_MODEL,
     OPENAI_API_KEY,
@@ -34,6 +36,23 @@ def _looks_like_openai_key(key: Optional[str]) -> bool:
 def _looks_like_gemini_key(key: Optional[str]) -> bool:
     k = (key or "").strip()
     return k.startswith("AIza")
+
+
+def _looks_like_claude_key(key: Optional[str]) -> bool:
+    k = (key or "").strip()
+    return k.startswith("sk-ant-")
+
+
+def _normalize_claude_model_name(model_name: Optional[str]) -> str:
+    raw = str(model_name or "").strip()
+    aliases = {
+        "claude-3-5-haiku-latest": "claude-3-5-haiku-20241022",
+        "claude-3-5-sonnet-latest": "claude-3-5-sonnet-20241022",
+        "claude-3-7-sonnet-latest": "claude-3-7-sonnet-20250219",
+        "claude-sonnet-4-0": "claude-sonnet-4-20250514",
+        "claude-opus-4-0": "claude-opus-4-20250514",
+    }
+    return aliases.get(raw, raw)
 
 
 def _looks_like_gemini_leaked_key_error(err_text: str) -> bool:
@@ -617,6 +636,20 @@ def _load_json_from_text(text: str) -> Any:
             raise AIServiceError("AI response JSON parsing failed") from exc
 
 
+def _anthropic_text_from_response(response: Any) -> str:
+    try:
+        parts: List[str] = []
+        for block in list(getattr(response, "content", []) or []):
+            if getattr(block, "type", "") != "text":
+                continue
+            text = str(getattr(block, "text", "") or "").strip()
+            if text:
+                parts.append(text)
+        return "\n".join(parts).strip()
+    except Exception:
+        return ""
+
+
 def _safe_float_env(*names: str, default: float) -> float:
     """Read float from env with fallback chain. Never raises."""
     for n in names:
@@ -820,18 +853,66 @@ def _normalize_receipt_review(data: Any) -> Dict[str, Any]:
     }
 
 
+def _normalize_answer_review(data: Any, *, expected: int) -> List[Dict[str, Any]]:
+    if isinstance(data, dict):
+        for key in ("items", "quiz", "questions", "answers", "reviews"):
+            if isinstance(data.get(key), list):
+                data = data.get(key)
+                break
+
+    if not isinstance(data, list):
+        raise AIServiceError("Answer review JSON must be a list or object with items")
+
+    out: List[Dict[str, Any]] = []
+    for item in data[: max(0, int(expected or 0))]:
+        if not isinstance(item, dict):
+            out.append({})
+            continue
+        raw_correct = item.get("correct_index")
+        if raw_correct is None:
+            raw_correct = item.get("correct")
+
+        correct_index: Optional[int] = None
+        try:
+            correct_index = int(raw_correct)
+        except Exception:
+            letter = str(raw_correct or "").strip().upper()
+            mapping = {"A": 0, "B": 1, "C": 2, "D": 3}
+            if letter in mapping:
+                correct_index = mapping[letter]
+
+        if correct_index is not None:
+            correct_index = max(0, min(3, int(correct_index)))
+
+        explanation = str(item.get("explanation") or item.get("reason") or "").strip()
+        out.append({"correct_index": correct_index, "explanation": explanation})
+
+    while len(out) < int(expected or 0):
+        out.append({})
+    return out[: int(expected or 0)]
+
+
 @dataclass
 class AIService:
     provider: str = AI_PROVIDER
     openai_api_key: Optional[str] = OPENAI_API_KEY
     gemini_api_key: Optional[str] = GEMINI_API_KEY
+    claude_api_key: Optional[str] = CLAUDE_API_KEY
     openai_model: str = OPENAI_MODEL
     gemini_model: str = GEMINI_MODEL
+    claude_model: str = CLAUDE_MODEL
 
-    def _pick_provider(self) -> str:
+    def _pick_provider(
+        self,
+        *,
+        task: str = "text",
+        question_count: int = 0,
+        text_len: int = 0,
+        needs_vision: bool = False,
+    ) -> str:
         provider = (self.provider or "auto").strip().lower()
-        if provider not in {"auto", "openai", "gemini"}:
-            raise AIServiceError("AI_PROVIDER faqat: auto | openai | gemini")
+        if provider not in {"auto", "openai", "gemini", "claude"}:
+            raise AIServiceError("AI_PROVIDER faqat: auto | openai | gemini | claude")
 
         if provider == "openai":
             if not (self.openai_api_key or "").strip():
@@ -853,10 +934,43 @@ class AIService:
                 raise AIServiceError("GEMINI_API_KEY ga OpenAI kaliti (sk-...) yozilib qolgan.")
             return "gemini"
 
-        # auto: choose by presence + key shape to avoid common misconfigurations
-        if (self.openai_api_key or "").strip() and _looks_like_openai_key(self.openai_api_key):
+        if provider == "claude":
+            if not (self.claude_api_key or "").strip():
+                raise AIServiceError("CLAUDE_API_KEY yo'q. .env ga qo'shing yoki AI_PROVIDER=openai qiling.")
+            if _looks_like_openai_key(self.claude_api_key):
+                raise AIServiceError("CLAUDE_API_KEY ga OpenAI kaliti (sk-...) yozilib qolgan.")
+            if _looks_like_gemini_key(self.claude_api_key):
+                raise AIServiceError("CLAUDE_API_KEY ga Gemini kaliti (AIza...) yozilib qolgan.")
+            return "claude"
+
+        openai_ready = bool((self.openai_api_key or "").strip() and _looks_like_openai_key(self.openai_api_key))
+        claude_ready = bool((self.claude_api_key or "").strip())
+        gemini_ready = bool((self.gemini_api_key or "").strip())
+
+        # Auto routing:
+        # - easy/fast text tasks -> OpenAI
+        # - heavier text/review tasks -> Claude
+        # - vision/scanned tasks -> existing OpenAI/Gemini path
+        if needs_vision:
+            if openai_ready:
+                return "openai"
+            if gemini_ready:
+                return "gemini"
+            if claude_ready:
+                return "claude"
+
+        hard_task = (
+            task in {"review", "hard_text", "hard_topic"}
+            or question_count >= 25
+            or text_len >= 18000
+        )
+        if hard_task and claude_ready:
+            return "claude"
+        if openai_ready:
             return "openai"
-        if (self.gemini_api_key or "").strip():
+        if claude_ready:
+            return "claude"
+        if gemini_ready:
             return "gemini"
         if _looks_like_gemini_key(self.openai_api_key) and not (self.gemini_api_key or "").strip():
             raise AIServiceError(
@@ -865,7 +979,7 @@ class AIService:
             )
         if (self.openai_api_key or "").strip():
             raise AIServiceError("OPENAI_API_KEY bor, lekin OpenAI kalitiga o'xshamaydi (sk-...).")
-        raise AIServiceError("OPENAI_API_KEY yoki GEMINI_API_KEY ni .env da sozlang.")
+        raise AIServiceError("OPENAI_API_KEY, CLAUDE_API_KEY yoki GEMINI_API_KEY ni .env da sozlang.")
 
     async def generate_quiz_from_text(
         self,
@@ -876,7 +990,11 @@ class AIService:
         focus_topic: str = "",
         shuffle_options: bool = True,
     ) -> List[Dict[str, Any]]:
-        provider = self._pick_provider()
+        provider = self._pick_provider(
+            task="hard_text" if int(question_count or 0) >= 25 else "text",
+            question_count=int(question_count or 0),
+            text_len=len(str(text or "")),
+        )
 
         cleaned = (text or "").strip()
         if len(cleaned) < 200:
@@ -937,6 +1055,14 @@ class AIService:
 
         if provider == "openai":
             questions = await self._generate_openai(
+                cleaned,
+                min(question_count, batch_size),
+                lang_instruction=lang_instruction,
+                extra_instructions=extra0,
+                shuffle_options=shuffle_options,
+            )
+        elif provider == "claude":
+            questions = await self._generate_claude(
                 cleaned,
                 min(question_count, batch_size),
                 lang_instruction=lang_instruction,
@@ -1020,6 +1146,8 @@ class AIService:
                 to_ask -= ask
                 if provider == "openai":
                     tasks.append(self._generate_openai(cleaned, ask, lang_instruction=lang_instruction, extra_instructions=extra, shuffle_options=shuffle_options))
+                elif provider == "claude":
+                    tasks.append(self._generate_claude(cleaned, ask, lang_instruction=lang_instruction, extra_instructions=extra, shuffle_options=shuffle_options))
                 else:
                     tasks.append(self._generate_gemini(cleaned, ask, lang_instruction=lang_instruction, extra_instructions=extra, shuffle_options=shuffle_options))
 
@@ -1043,6 +1171,74 @@ class AIService:
             )
         return uniq[:question_count]
 
+    async def review_quiz_answers(
+        self,
+        *,
+        source_text: str,
+        questions: List[Dict[str, Any]],
+        output_language: str = "source",
+        focus_topic: str = "",
+    ) -> List[Dict[str, Any]]:
+        provider = self._pick_provider(
+            task="review",
+            question_count=len(list(questions or [])),
+            text_len=len(str(source_text or "")),
+        )
+        source = str(source_text or "").strip()
+        if not source or not questions:
+            return list(questions or [])
+
+        review_batch = int(os.getenv("AI_REVIEW_BATCH_SIZE", "6") or 6)
+        review_batch = max(1, min(12, review_batch))
+        review_max_chars = int(os.getenv("AI_REVIEW_MAX_TEXT_CHARS", "16000") or 16000)
+        review_max_chars = max(4000, min(50000, review_max_chars))
+
+        reviewed: List[Dict[str, Any]] = []
+        for start in range(0, len(questions), review_batch):
+            batch = [dict(q or {}) for q in questions[start : start + review_batch]]
+            keywords: List[str] = []
+            if focus_topic:
+                keywords.append(str(focus_topic))
+            for q in batch:
+                if q.get("question"):
+                    keywords.append(str(q.get("question")))
+                for opt in list(q.get("options") or [])[:4]:
+                    if opt:
+                        keywords.append(str(opt))
+            topic_blob = " ".join(keywords)
+            relevant_text = _extract_relevant_text(source, topic_blob, max_chars=review_max_chars)
+            if provider == "openai":
+                fixes = await self._review_openai_answers(
+                    relevant_text,
+                    batch,
+                    output_language=output_language,
+                )
+            elif provider == "claude":
+                fixes = await self._review_claude_answers(
+                    relevant_text,
+                    batch,
+                    output_language=output_language,
+                )
+            elif provider == "gemini":
+                fixes = await self._review_gemini_answers(
+                    relevant_text,
+                    batch,
+                    output_language=output_language,
+                )
+            else:
+                fixes = [{} for _ in batch]
+
+            for idx, original in enumerate(batch):
+                fix = fixes[idx] if idx < len(fixes) else {}
+                corrected = dict(original)
+                if isinstance(fix, dict) and fix.get("correct_index") is not None:
+                    corrected["correct_index"] = max(0, min(3, int(fix["correct_index"])))
+                if isinstance(fix, dict) and str(fix.get("explanation") or "").strip():
+                    corrected["explanation"] = str(fix.get("explanation")).strip()
+                reviewed.append(corrected)
+
+        return reviewed or list(questions or [])
+
     async def generate_quiz_from_topic(
         self,
         topic: str,
@@ -1051,7 +1247,11 @@ class AIService:
         difficulty: str = "mixed",
         shuffle_options: bool = True,
     ) -> List[Dict[str, Any]]:
-        provider = self._pick_provider()
+        provider = self._pick_provider(
+            task="hard_topic" if int(question_count or 0) >= 25 else "topic",
+            question_count=int(question_count or 0),
+            text_len=len(str(topic or "")),
+        )
         topic = (topic or "").strip()
         if len(topic) < 3:
             raise AIServiceError("Mavzu juda qisqa. Iltimos, aniqroq yozing.")
@@ -1071,6 +1271,14 @@ class AIService:
 
         if provider == "openai":
             questions = await self._generate_openai_topic(
+                topic,
+                min(question_count, batch_size),
+                lang_instruction=lang_instruction,
+                extra_instructions=(intent_extra + "\n\n" + coverage_extra_topic + ("\n\n" + diff_extra_topic if diff_extra_topic else "")).strip(),
+                shuffle_options=shuffle_options,
+            )
+        elif provider == "claude":
+            questions = await self._generate_claude_topic(
                 topic,
                 min(question_count, batch_size),
                 lang_instruction=lang_instruction,
@@ -1149,6 +1357,16 @@ class AIService:
                             shuffle_options=shuffle_options,
                         )
                     )
+                elif provider == "claude":
+                    tasks.append(
+                        self._generate_claude_topic(
+                            topic,
+                            ask,
+                            lang_instruction=lang_instruction,
+                            extra_instructions=extra,
+                            shuffle_options=shuffle_options,
+                        )
+                    )
                 else:
                     tasks.append(
                         self._generate_gemini_topic(
@@ -1182,7 +1400,7 @@ class AIService:
         shuffle_options: bool = True,
     ) -> List[Dict[str, Any]]:
         """Generate exactly 1 question per image (vision)."""
-        provider = self._pick_provider()
+        provider = self._pick_provider(task="vision", needs_vision=True)
         if provider not in {"openai", "gemini"}:
             raise AIServiceError("Rasmli savollar faqat OpenAI yoki Gemini (vision) bilan ishlaydi.")
 
@@ -1214,7 +1432,7 @@ class AIService:
         Best for scanned PDFs that already contain table-form test rows.
         Falls back to the single-question vision path if a page yields nothing.
         """
-        provider = self._pick_provider()
+        provider = self._pick_provider(task="vision", needs_vision=True)
         if provider not in {"openai", "gemini"}:
             raise AIServiceError("Rasmli savollar faqat OpenAI yoki Gemini (vision) bilan ishlaydi.")
 
@@ -1508,6 +1726,8 @@ class AIService:
             f"- {_intent_instruction()}\n"
             f"- Savollar soni: {question_count}\n"
             "- Muhim: EXACTLY shu miqdorda savol qaytar (ro'yxat uzunligi aynan Savollar soni bo'lsin)\n"
+            "- Har savolning to'g'ri javobi matnning o'zida aniq topilishi shart; taxmin qilma\n"
+            "- Agar biror faktga ishonching komil bo'lmasa, o'sha savolni umuman tuzma\n"
             "- Har savolda 4 ta variant bo'lsin\n"
             "- Variantlar bir xil uslubda bo'lsin (hammasi ibora yoki hammasi 1 gap)\n"
             "- Variantlar uzunligi bir-biriga yaqin bo'lsin: eng uzun va eng qisqa variant farqi 2-3 so'zdan oshmasin\n"
@@ -1557,6 +1777,255 @@ class AIService:
             raise
 
         content = response.choices[0].message.content or ""
+        data = _load_json_from_text(content)
+        return _normalize_quiz(data, shuffle_options=shuffle_options)
+
+    async def _review_openai_answers(
+        self,
+        text: str,
+        questions: List[Dict[str, Any]],
+        *,
+        output_language: str,
+    ) -> List[Dict[str, Any]]:
+        try:
+            from openai import AsyncOpenAI
+        except ImportError as exc:
+            raise AIServiceError("openai not installed. Install: pip install openai") from exc
+
+        if not self.openai_api_key:
+            raise AIServiceError("OPENAI_API_KEY is not set")
+
+        client = AsyncOpenAI(api_key=self.openai_api_key)
+        total_timeout = float(os.getenv("OPENAI_REVIEW_TIMEOUT_SEC", "45") or 45)
+        total_timeout = max(10.0, min(180.0, total_timeout))
+        lang_instruction = _language_instruction(output_language)
+        payload = json.dumps(
+            [
+                {
+                    "question": str(q.get("question") or "").strip(),
+                    "options": list(q.get("options") or [])[:4],
+                    "correct_index": int(q.get("correct_index") or 0),
+                }
+                for q in questions
+            ],
+            ensure_ascii=False,
+        )
+        system_prompt = (
+            "Sen test tekshiruvchisan. Berilgan manba matn asosida savollarning faqat to'g'ri javob indeksini tekshir.\n"
+            "- Javobni faqat manba matndan topiladigan ma'lumot bilan belgila\n"
+            "- Taxmin qilma, tashqi bilimga tayanma\n"
+            "- Agar savolda yagona aniq javob manba matnda ko'rinmasa, berilgan correct_index ni o'zgartirma\n"
+            "- Har item uchun 0..3 oralig'ida correct_index qaytar\n"
+            f"- Izohlar tili: {lang_instruction}\n"
+            "Natijani faqat JSON ko'rinishida qaytar: "
+            "{\"items\":[{\"correct_index\":0,\"explanation\":\"qisqa izoh\"}]}"
+        )
+        user_prompt = f"Manba matn:\n{text}\n\nTekshiriladigan savollar JSONi:\n{payload}"
+
+        try:
+            response = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=self.openai_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.0,
+                    response_format={"type": "json_object"},
+                ),
+                timeout=total_timeout,
+            )
+        except Exception:
+            return [{} for _ in questions]
+
+        content = response.choices[0].message.content or ""
+        try:
+            data = _load_json_from_text(content)
+            return _normalize_answer_review(data, expected=len(questions))
+        except Exception:
+            return [{} for _ in questions]
+
+    async def _generate_claude(
+        self,
+        text: str,
+        question_count: int,
+        *,
+        lang_instruction: str,
+        extra_instructions: str = "",
+        shuffle_options: bool = True,
+    ) -> List[Dict[str, Any]]:
+        try:
+            from anthropic import AsyncAnthropic
+        except ImportError as exc:
+            raise AIServiceError("anthropic not installed. Install: pip install anthropic") from exc
+
+        if not self.claude_api_key:
+            raise AIServiceError("CLAUDE_API_KEY is not set")
+
+        client = AsyncAnthropic(api_key=self.claude_api_key)
+        model_name = _normalize_claude_model_name(self.claude_model)
+        timeout_sec = float(os.getenv("CLAUDE_TIMEOUT_SEC", os.getenv("AI_REQUEST_TIMEOUT_SEC", "90")) or 90)
+        timeout_sec = max(10.0, min(300.0, timeout_sec))
+        system_prompt = (
+            "Sen professional testologsan. Berilgan matn asosida ko'p tanlovli test yarat.\n"
+            f"- {_intent_instruction()}\n"
+            f"- Savollar soni: {question_count}\n"
+            "- Muhim: EXACTLY shu miqdorda savol qaytar (ro'yxat uzunligi aynan Savollar soni bo'lsin)\n"
+            "- Har savolning to'g'ri javobi matnning o'zida aniq topilishi shart; taxmin qilma\n"
+            "- Agar biror faktga ishonching komil bo'lmasa, o'sha savolni umuman tuzma\n"
+            "- Har savolda 4 ta variant bo'lsin\n"
+            "- Variantlar bir xil uslubda bo'lsin\n"
+            "- correct_index 0..3 bo'lsin\n"
+            "- explanation qisqa bo'lsin\n"
+            f"- Til: {lang_instruction}\n"
+            "Natijani faqat JSON ko'rinishida qaytar: {\"quiz\": [...]}."
+        )
+        user_prompt = f"{extra_instructions}\n\nMatn:\n{text}".strip()
+
+        try:
+            response = await asyncio.wait_for(
+                client.messages.create(
+                    model=model_name,
+                    max_tokens=8192,
+                    temperature=0.1,
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": user_prompt}],
+                ),
+                timeout=timeout_sec,
+            )
+        except asyncio.TimeoutError as exc:
+            raise AIServiceError(
+                _format_deadline_error("timeout", provider="claude", model_name=str(model_name), timeout_sec=int(timeout_sec))
+            ) from exc
+        except Exception as exc:
+            msg = str(exc)
+            if "401" in msg or "authentication" in msg.lower() or "invalid x-api-key" in msg.lower():
+                raise AIServiceError("Claude API key noto'g'ri yoki bekor qilingan. `.env` dagi `CLAUDE_API_KEY` ni tekshiring.") from exc
+            if _looks_like_deadline_exceeded(msg):
+                raise AIServiceError(
+                    _format_deadline_error(msg, provider="claude", model_name=str(model_name), timeout_sec=int(timeout_sec))
+                ) from exc
+            raise
+
+        content = _anthropic_text_from_response(response)
+        data = _load_json_from_text(content)
+        return _normalize_quiz(data, shuffle_options=shuffle_options)
+
+    async def _review_claude_answers(
+        self,
+        text: str,
+        questions: List[Dict[str, Any]],
+        *,
+        output_language: str,
+    ) -> List[Dict[str, Any]]:
+        try:
+            from anthropic import AsyncAnthropic
+        except ImportError as exc:
+            raise AIServiceError("anthropic not installed. Install: pip install anthropic") from exc
+
+        if not self.claude_api_key:
+            raise AIServiceError("CLAUDE_API_KEY is not set")
+
+        client = AsyncAnthropic(api_key=self.claude_api_key)
+        model_name = _normalize_claude_model_name(self.claude_model)
+        lang_instruction = _language_instruction(output_language)
+        payload = json.dumps(
+            [
+                {
+                    "question": str(q.get("question") or "").strip(),
+                    "options": list(q.get("options") or [])[:4],
+                    "correct_index": int(q.get("correct_index") or 0),
+                }
+                for q in questions
+            ],
+            ensure_ascii=False,
+        )
+        system_prompt = (
+            "Sen test tekshiruvchisan. Berilgan manba matn asosida savollarning faqat to'g'ri javob indeksini tekshir.\n"
+            "- Javobni faqat manba matndan topiladigan ma'lumot bilan belgila\n"
+            "- Taxmin qilma, tashqi bilimga tayanma\n"
+            "- Agar savolda yagona aniq javob manba matnda ko'rinmasa, berilgan correct_index ni o'zgartirma\n"
+            "- Har item uchun 0..3 oralig'ida correct_index qaytar\n"
+            f"- Izohlar tili: {lang_instruction}\n"
+            "Natijani faqat JSON ko'rinishida qaytar: "
+            "{\"items\":[{\"correct_index\":0,\"explanation\":\"qisqa izoh\"}]}"
+        )
+        user_prompt = f"Manba matn:\n{text}\n\nTekshiriladigan savollar JSONi:\n{payload}"
+
+        try:
+            response = await asyncio.wait_for(
+                client.messages.create(
+                    model=model_name,
+                    max_tokens=4096,
+                    temperature=0.0,
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": user_prompt}],
+                ),
+                timeout=float(os.getenv("CLAUDE_REVIEW_TIMEOUT_SEC", "60") or 60),
+            )
+            data = _load_json_from_text(_anthropic_text_from_response(response))
+            return _normalize_answer_review(data, expected=len(questions))
+        except Exception:
+            return [{} for _ in questions]
+
+    async def _generate_claude_topic(
+        self,
+        topic: str,
+        question_count: int,
+        *,
+        lang_instruction: str,
+        extra_instructions: str = "",
+        shuffle_options: bool = True,
+    ) -> List[Dict[str, Any]]:
+        try:
+            from anthropic import AsyncAnthropic
+        except ImportError as exc:
+            raise AIServiceError("anthropic not installed. Install: pip install anthropic") from exc
+
+        if not self.claude_api_key:
+            raise AIServiceError("CLAUDE_API_KEY is not set")
+
+        client = AsyncAnthropic(api_key=self.claude_api_key)
+        model_name = _normalize_claude_model_name(self.claude_model)
+        timeout_sec = float(os.getenv("CLAUDE_TIMEOUT_SEC", os.getenv("AI_REQUEST_TIMEOUT_SEC", "90")) or 90)
+        timeout_sec = max(10.0, min(300.0, timeout_sec))
+        system_prompt = f"""Sen professional testologsan. Berilgan MAVZU bo'yicha ko'p tanlovli test yarat.
+- {_intent_instruction()}
+- Savollar soni: {question_count}
+- Mavzuni keng qamrab ol, lekin noaniq faktni taxmin qilma.
+- Har savolda 4 ta variant bo'lsin.
+- correct_index 0..3 bo'lsin.
+- explanation qisqa bo'lsin.
+- Til: {lang_instruction}
+Natijani faqat JSON ko'rinishida qaytar: {{"quiz": [...]}}."""
+        user_prompt = f"{extra_instructions}\n\nMavzu: {topic}".strip()
+
+        try:
+            response = await asyncio.wait_for(
+                client.messages.create(
+                    model=model_name,
+                    max_tokens=8192,
+                    temperature=0.2,
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": user_prompt}],
+                ),
+                timeout=timeout_sec,
+            )
+        except asyncio.TimeoutError as exc:
+            raise AIServiceError(
+                _format_deadline_error("timeout", provider="claude", model_name=str(model_name), timeout_sec=int(timeout_sec))
+            ) from exc
+        except Exception as exc:
+            msg = str(exc)
+            if "401" in msg or "authentication" in msg.lower() or "invalid x-api-key" in msg.lower():
+                raise AIServiceError("Claude API key noto'g'ri yoki bekor qilingan. `.env` dagi `CLAUDE_API_KEY` ni tekshiring.") from exc
+            if _looks_like_deadline_exceeded(msg):
+                raise AIServiceError(
+                    _format_deadline_error(msg, provider="claude", model_name=str(model_name), timeout_sec=int(timeout_sec))
+                ) from exc
+            raise
+
+        content = _anthropic_text_from_response(response)
         data = _load_json_from_text(content)
         return _normalize_quiz(data, shuffle_options=shuffle_options)
 
@@ -1690,6 +2159,8 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
             "Sen professional testologsan. Berilgan matn asosida ko'p tanlovli test yarat.\n"
             f"- Savollar soni: {question_count}\n"
             "- Muhim: EXACTLY shu miqdorda savol qaytar (ro'yxat uzunligi aynan Savollar soni bo'lsin)\n"
+            "- Har savolning to'g'ri javobi matnning o'zida aniq topilishi shart; taxmin qilma\n"
+            "- Agar biror faktga ishonching komil bo'lmasa, o'sha savolni umuman tuzma\n"
             "- Har savolda 4 ta variant bo'lsin\n"
             "- Variantlar bir xil uslubda bo'lsin (hammasi ibora yoki hammasi 1 gap)\n"
             "- Variantlar uzunligi bir-biriga yaqin bo'lsin: eng uzun va eng qisqa variant farqi 2-3 so'zdan oshmasin\n"
@@ -1770,6 +2241,78 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
                 raise
         data = _load_json_from_text(raw)
         return _normalize_quiz(data, shuffle_options=shuffle_options)
+
+    async def _review_gemini_answers(
+        self,
+        text: str,
+        questions: List[Dict[str, Any]],
+        *,
+        output_language: str,
+    ) -> List[Dict[str, Any]]:
+        try:
+            import google.generativeai as genai
+        except ImportError as exc:
+            raise AIServiceError(
+                "google-generativeai not installed. Install: pip install google-generativeai"
+            ) from exc
+
+        if not self.gemini_api_key:
+            raise AIServiceError("GEMINI_API_KEY is not set")
+
+        genai.configure(api_key=self.gemini_api_key)
+        model_name = (self.gemini_model or "").strip()
+        if not model_name:
+            raise AIServiceError("GEMINI_MODEL bo'sh. .env da GEMINI_MODEL=... qo'ying.")
+        if model_name.startswith("models/"):
+            model_name = model_name.split("/", 1)[1]
+
+        model = genai.GenerativeModel(model_name)
+        lang_instruction = _language_instruction(output_language)
+        payload = json.dumps(
+            [
+                {
+                    "question": str(q.get("question") or "").strip(),
+                    "options": list(q.get("options") or [])[:4],
+                    "correct_index": int(q.get("correct_index") or 0),
+                }
+                for q in questions
+            ],
+            ensure_ascii=False,
+        )
+        prompt = (
+            "Sen test tekshiruvchisan. Berilgan manba matn asosida savollarning faqat to'g'ri javob indeksini tekshir.\n"
+            "- Javobni faqat manba matndan topiladigan ma'lumot bilan belgila\n"
+            "- Taxmin qilma, tashqi bilimga tayanma\n"
+            "- Agar savolda yagona aniq javob manba matnda ko'rinmasa, berilgan correct_index ni o'zgartirma\n"
+            "- Har item uchun 0..3 oralig'ida correct_index qaytar\n"
+            f"- Izohlar tili: {lang_instruction}\n"
+            "Natijani faqat JSON ko'rinishida qaytar: "
+            "{\"items\":[{\"correct_index\":0,\"explanation\":\"qisqa izoh\"}]}\n\n"
+            f"Manba matn:\n{text}\n\nTekshiriladigan savollar JSONi:\n{payload}"
+        )
+
+        def _call() -> str:
+            try:
+                try:
+                    resp = model.generate_content(
+                        prompt,
+                        generation_config={
+                            "temperature": 0.0,
+                            "response_mime_type": "application/json",
+                        },
+                    )
+                except TypeError:
+                    resp = model.generate_content(prompt)
+                return getattr(resp, "text", "") or ""
+            except Exception:
+                return ""
+
+        try:
+            raw = await asyncio.wait_for(asyncio.to_thread(_call), timeout=45)
+            data = _load_json_from_text(raw)
+            return _normalize_answer_review(data, expected=len(questions))
+        except Exception:
+            return [{} for _ in questions]
 
     async def _generate_gemini_topic(
         self,

@@ -2,9 +2,9 @@ import json
 import os
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import Any, AsyncIterator, List, Optional
 
-from sqlalchemy import Boolean, Column, ForeignKey, Integer, BigInteger, Text, desc, func, select
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, BigInteger, Text, desc, func, select
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.engine.url import make_url
@@ -96,7 +96,7 @@ class ReferralInvite(Base):
 class Quiz(Base):
     __tablename__ = 'quizzes'
     id = Column(Integer, primary_key=True)
-    creator_id = Column(BigInteger, ForeignKey('users.id'))
+    creator_id = Column(BigInteger, ForeignKey('users.id'), index=True)
     title = Column(Text, default="")
     is_ai_generated = Column(Boolean, default=False)
     open_period = Column(Integer, default=30)  # seconds per question (poll open_period)
@@ -107,7 +107,7 @@ class Quiz(Base):
 class Question(Base):
     __tablename__ = 'questions'
     id = Column(Integer, primary_key=True)
-    quiz_id = Column(Integer, ForeignKey('quizzes.id'))
+    quiz_id = Column(Integer, ForeignKey('quizzes.id'), index=True)
     text = Column(Text, default="")
     options = Column(Text, default="[]")  # JSON string (["A","B","C","D"])
     correct_answer = Column(Integer, default=0)  # 0..3
@@ -121,8 +121,8 @@ class Question(Base):
 class QuizAttempt(Base):
     __tablename__ = 'quiz_attempts'
     id = Column(Integer, primary_key=True)
-    user_id = Column(BigInteger, ForeignKey('users.id'))
-    quiz_id = Column(Integer, ForeignKey('quizzes.id'))
+    user_id = Column(BigInteger, ForeignKey('users.id'), index=True)
+    quiz_id = Column(Integer, ForeignKey('quizzes.id'), index=True)
     # "score" kept for backward compatibility (represents correct answers count).
     score = Column(Integer, default=0)
     answered = Column(Integer, default=0)
@@ -133,6 +133,11 @@ class QuizAttempt(Base):
     chat_type = Column(Text, default="")
     finished = Column(Boolean, default=True)
     completed_at = Column(Text, default="")  # ISO timestamp
+
+    __table_args__ = (
+        Index('ix_quiz_attempts_quiz_id_id', 'quiz_id', 'id'),
+        Index('ix_quiz_attempts_completed_at', 'completed_at'),
+    )
 
 
 class ManualQuizDraft(Base):
@@ -191,8 +196,31 @@ def _build_engine():
     except Exception:
         return create_async_engine(url_raw, **engine_kwargs)
 
+    drivername = str(getattr(url, 'drivername', '') or '')
+
+    # SQLite: enable WAL mode for better concurrent read/write throughput.
+    if drivername.startswith('sqlite'):
+        engine_kwargs['connect_args'] = {'timeout': 30}
+
+        async def _set_wal(conn: Any) -> None:
+            await conn.execute('PRAGMA journal_mode=WAL')
+            await conn.execute('PRAGMA synchronous=NORMAL')
+            await conn.execute('PRAGMA cache_size=-65536')  # 64 MB page cache
+
+        engine_kwargs['connect_args'] = {'timeout': 30}
+        engine = create_async_engine(url_raw, **engine_kwargs)
+        from sqlalchemy import event as sa_event
+
+        @sa_event.listens_for(engine.sync_engine, 'connect')
+        def _on_connect(dbapi_conn: Any, _: Any) -> None:
+            dbapi_conn.execute('PRAGMA journal_mode=WAL')
+            dbapi_conn.execute('PRAGMA synchronous=NORMAL')
+            dbapi_conn.execute('PRAGMA cache_size=-65536')
+
+        return engine
+
     # Postgres asyncpg: handle sslmode=... in query (asyncpg doesn't accept sslmode).
-    if str(getattr(url, 'drivername', '') or '').startswith('postgresql+asyncpg'):
+    if drivername.startswith('postgresql+asyncpg'):
         q = dict(getattr(url, 'query', {}) or {})
 
         sslmode = str(os.getenv('DB_SSLMODE', '') or q.pop('sslmode', '') or '').strip()
@@ -200,12 +228,13 @@ def _build_engine():
         if sslmode:
             connect_args.update(_asyncpg_ssl_args(sslmode))
 
-        # Pool tuning for production DBs.
+        # Pool tuning — raised defaults for 100k+ user deployments.
         try:
             engine_kwargs['pool_pre_ping'] = True
-            engine_kwargs['pool_size'] = int(os.getenv('DB_POOL_SIZE', '5') or 5)
-            engine_kwargs['max_overflow'] = int(os.getenv('DB_MAX_OVERFLOW', '10') or 10)
+            engine_kwargs['pool_size'] = int(os.getenv('DB_POOL_SIZE', '20') or 20)
+            engine_kwargs['max_overflow'] = int(os.getenv('DB_MAX_OVERFLOW', '40') or 40)
             engine_kwargs['pool_timeout'] = int(os.getenv('DB_POOL_TIMEOUT', '30') or 30)
+            engine_kwargs['pool_recycle'] = int(os.getenv('DB_POOL_RECYCLE', '1800') or 1800)
         except Exception:
             pass
 
@@ -309,6 +338,41 @@ async def list_broadcast_user_ids() -> List[int]:
         stmt = select(User.id).order_by(User.id.asc())
         rows = (await session.execute(stmt)).all()
         return [int(r[0]) for r in rows if int(r[0] or 0) > 0]
+
+
+async def list_broadcast_user_ids_paged(
+    page_size: int = 500,
+    after_id: int = 0,
+) -> AsyncIterator[List[int]]:
+    """Yield pages of user IDs for memory-efficient broadcasting to 100k+ users.
+
+    Usage:
+        async for page in list_broadcast_user_ids_paged():
+            for uid in page:
+                await bot.send_message(uid, text)
+                await asyncio.sleep(0.05)  # respect Telegram rate limits
+    """
+    page_size = max(1, min(2000, int(page_size or 500)))
+    cursor = int(after_id or 0)
+    while True:
+        async with async_session() as session:
+            stmt = (
+                select(User.id)
+                .where(User.id > cursor)
+                .order_by(User.id.asc())
+                .limit(page_size)
+            )
+            rows = (await session.execute(stmt)).all()
+
+        if not rows:
+            return
+        page = [int(r[0]) for r in rows if int(r[0] or 0) > 0]
+        if not page:
+            return
+        yield page
+        cursor = page[-1]
+        if len(rows) < page_size:
+            return
 
 
 async def list_broadcast_group_chat_ids() -> List[int]:
@@ -799,12 +863,19 @@ async def create_quiz_attempts_bulk(
         return 0
 
     async with async_session() as session:
-        # Upsert user profiles (best-effort).
+        # Batch-fetch all user rows in one query instead of N individual gets.
+        uids = list(user_updates.keys())
+        existing_rows = (
+            await session.execute(select(User).where(User.id.in_(uids)))
+        ).scalars().all()
+        existing_map: dict[int, User] = {int(u.id): u for u in existing_rows}
+        existing_ids = set(existing_map.keys())
+
         for uid, (full_name, username) in user_updates.items():
-            u = await session.get(User, int(uid))
-            if u is None:
+            if uid not in existing_ids:
                 session.add(User(id=int(uid), full_name=full_name or "", username=username or ""))
                 continue
+            u = existing_map[uid]
             changed = False
             if full_name and full_name != str(u.full_name or ""):
                 u.full_name = full_name
@@ -826,6 +897,9 @@ async def get_quiz_attempt_stats(quiz_id: int, limit: int = 30) -> List[dict]:
     quiz_id = int(quiz_id)
     limit = max(1, min(100, int(limit or 30)))
 
+    # Fetch at most limit*10 rows at the DB level to avoid full-table scans
+    # on popular quizzes that may have thousands of attempts.
+    db_row_cap = min(10_000, limit * 50)
     async with async_session() as session:
         stmt = (
             select(
@@ -843,6 +917,7 @@ async def get_quiz_attempt_stats(quiz_id: int, limit: int = 30) -> List[dict]:
             .join(User, User.id == QuizAttempt.user_id)
             .where(QuizAttempt.quiz_id == quiz_id)
             .order_by(desc(QuizAttempt.id))
+            .limit(db_row_cap)
         )
         rows = (await session.execute(stmt)).all()
 
@@ -1073,10 +1148,6 @@ def _is_trial_active(expires_at: str) -> bool:
     return dt > datetime.now(timezone.utc)
 
 
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
 # --- Referral -------------------------------------------------------
 
 async def record_referral_invite(*, referrer_id: int, referred_user_id: int) -> bool:
@@ -1123,42 +1194,24 @@ async def get_referral_status(user_id: int) -> dict:
             'to_next_reward': 3,
         }
 
+    # Single query: fetch all rows for this referrer, aggregate in Python.
+    # Avoids 5 round-trips for what is typically a small set of rows per user.
     async with async_session() as session:
-        total = await session.execute(select(func.count()).select_from(ReferralInvite).where(ReferralInvite.referrer_id == user_id))
-        total_n = int(total.scalar() or 0)
-
-        qualified = await session.execute(
-            select(func.count()).select_from(ReferralInvite).where(
-                ReferralInvite.referrer_id == user_id,
-                ReferralInvite.qualified_at != '',
+        rows = (
+            await session.execute(
+                select(ReferralInvite.qualified_at, ReferralInvite.rewarded_at)
+                .where(ReferralInvite.referrer_id == user_id)
             )
-        )
-        qualified_n = int(qualified.scalar() or 0)
+        ).all()
 
-        pending = await session.execute(
-            select(func.count()).select_from(ReferralInvite).where(
-                ReferralInvite.referrer_id == user_id,
-                ReferralInvite.qualified_at == '',
-            )
-        )
-        pending_n = int(pending.scalar() or 0)
-
-        unrewarded = await session.execute(
-            select(func.count()).select_from(ReferralInvite).where(
-                ReferralInvite.referrer_id == user_id,
-                ReferralInvite.qualified_at != '',
-                ReferralInvite.rewarded_at == '',
-            )
-        )
-        unrewarded_n = int(unrewarded.scalar() or 0)
-
-        rewarded = await session.execute(
-            select(func.count()).select_from(ReferralInvite).where(
-                ReferralInvite.referrer_id == user_id,
-                ReferralInvite.rewarded_at != '',
-            )
-        )
-        rewarded_n = int(rewarded.scalar() or 0)
+    total_n = len(rows)
+    qualified_n = sum(1 for r in rows if str(r.qualified_at or '').strip())
+    pending_n = total_n - qualified_n
+    rewarded_n = sum(1 for r in rows if str(r.rewarded_at or '').strip())
+    unrewarded_n = sum(
+        1 for r in rows
+        if str(r.qualified_at or '').strip() and not str(r.rewarded_at or '').strip()
+    )
 
     to_next = 3 - (unrewarded_n % 3) if unrewarded_n % 3 else 0
     if to_next == 0 and unrewarded_n == 0:

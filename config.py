@@ -51,14 +51,16 @@ BOT_TOKEN = _get_env("BOT_TOKEN", required=True)
 # AI keys (at least one should be set if you want AI quiz generation)
 GEMINI_API_KEY = _get_env("GEMINI_API_KEY")
 OPENAI_API_KEY = _get_env("OPENAI_API_KEY")
+CLAUDE_API_KEY = _get_env("CLAUDE_API_KEY") or _get_env("ANTHROPIC_API_KEY")
 
 # AI provider/model configuration
-# AI_PROVIDER: "auto" | "gemini" | "openai"
+# AI_PROVIDER: "auto" | "gemini" | "openai" | "claude"
 AI_PROVIDER = str(_get_env("AI_PROVIDER", "auto")).strip().lower()
 OPENAI_MODEL = _get_env("OPENAI_MODEL", "gpt-4o-mini")
 # NOTE: gemini-1.5-flash has been removed for many accounts. Use a "latest" alias by default.
 # You can paste either "models/..." or the plain name into .env (see scripts/list_gemini_models.py).
 GEMINI_MODEL = _get_env("GEMINI_MODEL", "gemini-flash-latest")
+CLAUDE_MODEL = _get_env("CLAUDE_MODEL", "claude-3-5-haiku-20241022")
 
 # Bot mode
 # BOT_MODE: "ai" (default) | "noai"
@@ -157,9 +159,11 @@ __all__ = [
     "BOT_TOKEN",
     "GEMINI_API_KEY",
     "OPENAI_API_KEY",
+    "CLAUDE_API_KEY",
     "AI_PROVIDER",
     "OPENAI_MODEL",
     "GEMINI_MODEL",
+    "CLAUDE_MODEL",
     "BOT_MODE",
     "AI_ENABLED",
     "DATABASE_URL",

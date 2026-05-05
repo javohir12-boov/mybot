@@ -46,11 +46,17 @@ def _looks_like_claude_key(key: Optional[str]) -> bool:
 def _normalize_claude_model_name(model_name: Optional[str]) -> str:
     raw = str(model_name or "").strip()
     aliases = {
-        "claude-3-5-haiku-latest": "claude-3-5-haiku-20241022",
-        "claude-3-5-sonnet-latest": "claude-3-5-sonnet-20241022",
-        "claude-3-7-sonnet-latest": "claude-3-7-sonnet-20250219",
-        "claude-sonnet-4-0": "claude-sonnet-4-20250514",
-        "claude-opus-4-0": "claude-opus-4-20250514",
+        # Legacy names → current model IDs
+        "claude-3-5-haiku-latest": "claude-haiku-4-5-20251001",
+        "claude-3-5-haiku-20241022": "claude-haiku-4-5-20251001",
+        "claude-3-5-sonnet-latest": "claude-sonnet-4-6",
+        "claude-3-5-sonnet-20241022": "claude-sonnet-4-6",
+        "claude-3-7-sonnet-latest": "claude-sonnet-4-6",
+        "claude-3-7-sonnet-20250219": "claude-sonnet-4-6",
+        "claude-sonnet-4-0": "claude-sonnet-4-6",
+        "claude-sonnet-4-20250514": "claude-sonnet-4-6",
+        "claude-opus-4-0": "claude-opus-4-7",
+        "claude-opus-4-20250514": "claude-opus-4-7",
     }
     return aliases.get(raw, raw)
 

@@ -60,7 +60,7 @@ OPENAI_MODEL = _get_env("OPENAI_MODEL", "gpt-4o-mini")
 # NOTE: gemini-1.5-flash has been removed for many accounts. Use a "latest" alias by default.
 # You can paste either "models/..." or the plain name into .env (see scripts/list_gemini_models.py).
 GEMINI_MODEL = _get_env("GEMINI_MODEL", "gemini-flash-latest")
-CLAUDE_MODEL = _get_env("CLAUDE_MODEL", "claude-3-5-haiku-20241022")
+CLAUDE_MODEL = _get_env("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
 # Bot mode
 # BOT_MODE: "ai" (default) | "noai"

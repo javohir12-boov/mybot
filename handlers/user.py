@@ -4402,22 +4402,39 @@ def _kb_langs(session_id: str, *, ui_lang: str = "uz") -> types.InlineKeyboardMa
 def _kb_page_presets(session_id: str, total_pages: int, *, ui_lang: str = "uz") -> types.InlineKeyboardMarkup:
     ui_lang = norm_ui_lang(ui_lang)
     total_pages = int(total_pages or 0)
-    presets = [25, 50, 100]
-
-    ends: List[int] = []
-    for n in presets:
-        end = int(n)
-        if total_pages > 0:
-            end = min(total_pages, end)
-        end = max(1, end)
-        if end not in ends:
-            ends.append(end)
 
     kb = InlineKeyboardBuilder()
-    for end in ends:
-        kb.button(text=f"1-{end}", callback_data=f"ai_pageset:{session_id}:1:{end}")
+    ranges: List[tuple[int, int]] = []
+
+    if total_pages <= 1:
+        ranges.append((1, 1))
+    elif total_pages <= 12:
+        chunk = 3 if total_pages > 6 else 2
+        start = 1
+        while start <= total_pages:
+            end = min(total_pages, start + chunk - 1)
+            ranges.append((start, end))
+            start = end + 1
+        ranges.append((1, total_pages))
+    else:
+        chunk = min(10, max(5, (total_pages + 2) // 3))
+        start = 1
+        while start <= total_pages and len(ranges) < 4:
+            end = min(total_pages, start + chunk - 1)
+            ranges.append((start, end))
+            start = end + 1
+        ranges.append((1, total_pages))
+
+    seen: set[tuple[int, int]] = set()
+    for start, end in ranges:
+        pair = (max(1, int(start)), max(1, int(end)))
+        if pair in seen:
+            continue
+        seen.add(pair)
+        label = f"{pair[0]}" if pair[0] == pair[1] else f"{pair[0]}-{pair[1]}"
+        kb.button(text=label, callback_data=f"ai_pageset:{session_id}:{pair[0]}:{pair[1]}")
     kb.button(text=t(ui_lang, "btn_cancel"), callback_data=f"ai_cancel:{session_id}")
-    kb.adjust(3, 1)
+    kb.adjust(2, 2, 1)
     return kb.as_markup()
 
 def _kb_difficulty(session_id: str, *, ui_lang: str = "uz", optional: bool = False) -> types.InlineKeyboardMarkup:
@@ -5315,12 +5332,24 @@ def _parse_page_range(raw_text: str) -> Optional[tuple[int, int]]:
     raw = (raw_text or "").strip()
     if not raw:
         return None
-    nums = [int(x) for x in re.findall(r"\d{1,4}", raw)]
+    normalized = (
+        raw.replace("–", "-")
+        .replace("—", "-")
+        .replace("−", "-")
+        .replace("…", "-")
+        .replace(":", "-")
+        .replace(";", "-")
+        .replace(",", " ")
+    )
+    nums = [int(x) for x in re.findall(r"\d{1,4}", normalized)]
     if not nums:
         return None
     if len(nums) == 1:
         return nums[0], nums[0]
-    return nums[0], nums[1]
+    p_from, p_to = nums[0], nums[1]
+    if p_from > p_to:
+        p_from, p_to = p_to, p_from
+    return p_from, p_to
 
 
 @router.message(AIQuizStates.choose_pages)

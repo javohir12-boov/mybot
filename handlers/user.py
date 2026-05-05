@@ -220,8 +220,8 @@ def _lang_self_name(code: str) -> str:
         "ru": "Русский",
         "en": "English",
         "de": "Deutsch",
-        "tr": "T?rk?e",
-        "kk": "???????",
+        "tr": "Türkçe",
+        "kk": "Қазақша",
         "ar": "العربية",
         "zh": "中文",
         "ko": "한국어",
@@ -705,17 +705,88 @@ def _user_mention_html(user_id: int, name: str, username: str = "") -> str:
 
 def _rank_icon(i: int) -> str:
     if i == 1:
-        return "рџҐ‡"
+        return "🥇"
     if i == 2:
-        return "рџҐ€"
+        return "🥈"
     if i == 3:
-        return "рџҐ‰"
+        return "🥉"
     return f"{i}."
+
+
+def _score_labels(ui_lang: str) -> Dict[str, str]:
+    lang = norm_ui_lang(ui_lang)
+    labels: Dict[str, Dict[str, str]] = {
+        "uz": {
+            "correct": "To'g'ri",
+            "total_time": "Jami vaqt",
+            "avg": "O'rtacha vaqt",
+            "answered": "Ishlagan",
+            "skipped": "O'tkazib yuborgan",
+        },
+        "ru": {
+            "correct": "Верно",
+            "total_time": "Общее время",
+            "avg": "Среднее время",
+            "answered": "Ответил",
+            "skipped": "Пропустил",
+        },
+        "en": {
+            "correct": "Correct",
+            "total_time": "Total time",
+            "avg": "Average time",
+            "answered": "Answered",
+            "skipped": "Skipped",
+        },
+        "de": {
+            "correct": "Richtig",
+            "total_time": "Gesamtzeit",
+            "avg": "Durchschnitt",
+            "answered": "Beantwortet",
+            "skipped": "Übersprungen",
+        },
+        "tr": {
+            "correct": "Doğru",
+            "total_time": "Toplam süre",
+            "avg": "Ortalama süre",
+            "answered": "Cevapladı",
+            "skipped": "Atladı",
+        },
+        "kk": {
+            "correct": "Дұрыс",
+            "total_time": "Жалпы уақыт",
+            "avg": "Орташа уақыт",
+            "answered": "Жауап берді",
+            "skipped": "Өткізіп жіберді",
+        },
+        "ar": {
+            "correct": "صحيح",
+            "total_time": "الوقت الإجمالي",
+            "avg": "متوسط الوقت",
+            "answered": "أجاب",
+            "skipped": "تجاوز",
+        },
+        "zh": {
+            "correct": "正确",
+            "total_time": "总时间",
+            "avg": "平均时间",
+            "answered": "已作答",
+            "skipped": "已跳过",
+        },
+        "ko": {
+            "correct": "정답",
+            "total_time": "총 시간",
+            "avg": "평균 시간",
+            "answered": "응답함",
+            "skipped": "건너뜀",
+        },
+    }
+    return labels.get(lang, labels["en"])
 
 
 def _format_scoreboard(run: QuizRun, *, limit: int = 20) -> str:
     total_questions = len(run.questions)
     ui_lang = norm_ui_lang(getattr(run, "ui_lang", "uz"))
+    labels = _score_labels(ui_lang)
 
     rows: List[dict] = []
     for user_id, score in (run.scores or {}).items():
@@ -738,11 +809,11 @@ def _format_scoreboard(run: QuizRun, *, limit: int = 20) -> str:
     rows.sort(key=lambda x: (-x["correct"], -x["answered"], x["total_time"], str(x["name"]).lower()))
 
     title = t(ui_lang, "scoreboard_title").rstrip(":").strip() or "Results"
-    lines: List[str] = [f"рџЏ† <b>{html.escape(title)}</b>"]
+    lines: List[str] = [f"🏆 <b>{html.escape(title)}</b>"]
 
     if run.chat_type in {"group", "supergroup"} and run.participants:
-        lines.append("рџ‘Ґ " + html.escape(t(ui_lang, "participants_joined", n=len(run.participants))))
-    lines.append("рџ§ѕ " + html.escape(t(ui_lang, "total_questions", n=total_questions)))
+        lines.append("👥 " + html.escape(t(ui_lang, "participants_joined", n=len(run.participants))))
+    lines.append("🧩 " + html.escape(t(ui_lang, "total_questions", n=total_questions)))
     lines.append("")
 
     shown = rows[: max(1, int(limit or 20))]
@@ -754,13 +825,12 @@ def _format_scoreboard(run: QuizRun, *, limit: int = 20) -> str:
 
         lines.append(f"{icon} {mention}")
 
-        detail_parts = [f"вњ… {int(r['correct'])}/{int(r['answered'])}"]
-        detail_parts.append(f"вЏ± {int(r['total_time'])}s")
+        lines.append(f"✅ {labels['correct']}: {int(r['correct'])}/{int(r['answered'])}")
+        lines.append(f"⏱ {labels['total_time']}: {int(r['total_time'])}s")
         if int(r["answered"]):
-            detail_parts.append(f"вЊЂ {avg_s}s")
-        if missed:
-            detail_parts.append(f"вЏ­ {missed}")
-        lines.append("   " + " | ".join(detail_parts))
+            lines.append(f"⌛ {labels['avg']}: {avg_s}s")
+        lines.append(f"📝 {labels['answered']}: {int(r['answered'])}")
+        lines.append(f"⏭ {labels['skipped']}: {missed}")
         lines.append("")
 
     if len(rows) > len(shown):
@@ -1819,11 +1889,12 @@ async def quiz_stats(call: types.CallbackQuery) -> None:
 
     title = str(summary.get("title") or f"Quiz {quiz_id}").strip()
     qcount = int(summary.get("question_count") or 0)
+    labels = _score_labels(ui_lang)
 
     head = t(ui_lang, "stats_title", title=title)
-    lines: List[str] = [f"рџ“€ <b>{html.escape(head)}</b>"]
-    lines.append(f"рџ†” ID: {int(quiz_id)}")
-    lines.append(f"рџ“Ќ {html.escape(t(ui_lang, 'total_questions', n=qcount))}")
+    lines: List[str] = [f"📊 <b>{html.escape(head)}</b>"]
+    lines.append(f"🆔 ID: {int(quiz_id)}")
+    lines.append(f"🧩 {html.escape(t(ui_lang, 'total_questions', n=qcount))}")
     lines.append("")
 
     for i, item in enumerate(stats[:30], start=1):
@@ -1839,11 +1910,11 @@ async def quiz_stats(call: types.CallbackQuery) -> None:
 
         mention = _user_mention_html(uid, name, username)
         lines.append(f"{_rank_icon(i)} {mention}")
-        details = [f"вњ… {correct}/{answered}", f"вЏ± {total_time_s}s"]
+        details = [f"✅ {labels['correct']}: {correct}/{answered}", f"⏱ {labels['total_time']}: {total_time_s}s"]
         if answered:
-            details.append(f"вЊЂ {avg_s}s")
-        details.append(f"рџ”Ѓ {attempts}x")
-        lines.append("   " + " | ".join(details))
+            details.append(f"⌛ {labels['avg']}: {avg_s}s")
+        details.append(f"🔁 {attempts}x")
+        lines.append("   " + "\n   ".join(details))
         lines.append("")
 
     await call.message.answer(

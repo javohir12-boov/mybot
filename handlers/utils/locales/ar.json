@@ -71,6 +71,8 @@
   "edit_title_prompt": "أرسل العنوان الجديد:",
   "err_ai": "خطأ: {err}",
   "err_unexpected": "خطأ غير متوقع: {err}",
+  "err_rate_limit": "تم الوصول إلى حد طلبات خدمة AI. يرجى المحاولة مرة أخرى بعد 1-2 دقيقة.",
+  "err_unexpected_safe": "حدث خطأ غير متوقع. يرجى الانتظار قليلاً والمحاولة مرة أخرى.",
   "error_short": "خطأ.",
   "explanation_prefix": "الشرح: {text}",
   "extracting_text": "جارٍ استخراج النص...",

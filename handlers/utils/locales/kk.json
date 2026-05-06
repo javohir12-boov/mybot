@@ -71,6 +71,8 @@
   "edit_title_prompt": "Жаңа атауын жіберіңіз:",
   "err_ai": "Қате: {err}",
   "err_unexpected": "Күтпеген қате: {err}",
+  "err_rate_limit": "AI қызметінің сұраныс лимиті толды. 1-2 минуттан кейін қайталап көріңіз.",
+  "err_unexpected_safe": "Күтпеген қате орын алды. Бір сәт күтіп, қайталап көріңіз.",
   "error_short": "Қате.",
   "explanation_prefix": "Түсіндірме: {text}",
   "extracting_text": "Мәтін алынуда...",

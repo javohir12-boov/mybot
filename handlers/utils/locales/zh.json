@@ -71,6 +71,8 @@
   "edit_title_prompt": "发送新的标题：",
   "err_ai": "错误：{err}",
   "err_unexpected": "意外错误：{err}",
+  "err_rate_limit": "AI服务请求限额已达到。请在1-2分钟后重试。",
+  "err_unexpected_safe": "发生了意外错误。请稍候再重试。",
   "error_short": "错误。",
   "explanation_prefix": "解析：{text}",
   "extracting_text": "正在提取文本...",

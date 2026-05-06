@@ -265,6 +265,39 @@ def _format_ai_error_text(ui_lang: str, exc: Exception) -> str:
     return t(ui_lang, "err_ai", err=err or t(ui_lang, "error_short"))
 
 
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    msg = str(exc or "").lower()
+    return (
+        "rate_limit" in msg
+        or "rate limit" in msg
+        or "429" in msg
+        or "too many requests" in msg
+        or "tokens per minute" in msg
+        or "requests per minute" in msg
+        or "output tokens per minute" in msg
+    )
+
+
+async def _notify_admins_error(bot: "Bot", user_id: int, exc: BaseException, context: str = "") -> None:
+    if not ADMIN_IDS:
+        return
+    import traceback
+    tb = traceback.format_exc()
+    tb_short = tb[-1800:] if len(tb) > 1800 else tb
+    text = (
+        f"⚠️ Bot xatosi\n"
+        f"👤 User: {user_id}\n"
+        f"📍 Kontekst: {context or 'noma`lum'}\n"
+        f"❌ Xato: {type(exc).__name__}: {str(exc)[:300]}\n\n"
+        f"<pre>{tb_short}</pre>"
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, text, parse_mode="HTML")
+        except Exception:
+            pass
+
+
 def _file_type_only_message(ui_lang: str) -> str:
     note_map = {
         "uz": "Iltimos, fayl formatini o'zgartirib qayta yuboring.",
@@ -6653,7 +6686,10 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
         anim_stop.set()
         with suppress(Exception):
             await anim_task
-        await msg.edit_text(t(ui_lang, "err_unexpected", err=str(exc)))
+        user_msg = t(ui_lang, "err_rate_limit") if _is_rate_limit_error(exc) else t(ui_lang, "err_unexpected_safe")
+        await msg.edit_text(user_msg)
+        user_id_for_log = int(getattr(user, "id", 0) or 0)
+        asyncio.create_task(_notify_admins_error(bot, user_id_for_log, exc, context="quiz generation"))
     finally:
         anim_stop.set()
         if anim_task and not anim_task.done():
@@ -6991,7 +7027,10 @@ async def on_photo_upload(message: types.Message, bot: Bot, state: FSMContext) -
         await state.set_state(AIQuizStates.choose_time)
         await status.edit_text(t(ui_lang, "choose_time"), reply_markup=_kb_ai_time_presets(session_id, ui_lang=ui_lang))
     except Exception as exc:
-        await status.edit_text(t(ui_lang, "err_unexpected", err=str(exc)))
+        user_msg = t(ui_lang, "err_rate_limit") if _is_rate_limit_error(exc) else t(ui_lang, "err_unexpected_safe")
+        await status.edit_text(user_msg)
+        uid = message.from_user.id if message.from_user else 0
+        asyncio.create_task(_notify_admins_error(bot, uid, exc, context="photo upload"))
         if local_path is not None:
             try:
                 local_path.unlink(missing_ok=True)
@@ -7257,7 +7296,10 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
     except AIServiceError as exc:
         await status.edit_text(_format_ai_error_text(ui_lang, exc))
     except Exception as exc:
-        await status.edit_text(t(ui_lang, "err_unexpected", err=str(exc)))
+        user_msg = t(ui_lang, "err_rate_limit") if _is_rate_limit_error(exc) else t(ui_lang, "err_unexpected_safe")
+        await status.edit_text(user_msg)
+        uid = message.from_user.id if message.from_user else 0
+        asyncio.create_task(_notify_admins_error(bot, uid, exc, context="document upload"))
     finally:
         if local_path is not None and cleanup_local:
             try:

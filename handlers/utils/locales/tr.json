@@ -71,6 +71,8 @@
   "edit_title_prompt": "Yeni başlığı gönderin:",
   "err_ai": "Hata: {err}",
   "err_unexpected": "Beklenmeyen hata: {err}",
+  "err_rate_limit": "AI hizmet istek limiti aşıldı. Lütfen 1-2 dakika sonra tekrar deneyin.",
+  "err_unexpected_safe": "Beklenmeyen bir hata oluştu. Lütfen kısa bir süre bekleyin ve tekrar deneyin.",
   "error_short": "Hata.",
   "explanation_prefix": "Açıklama: {text}",
   "extracting_text": "Metin çıkarılıyor...",

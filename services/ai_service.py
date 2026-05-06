@@ -898,6 +898,46 @@ def _normalize_answer_review(data: Any, *, expected: int) -> List[Dict[str, Any]
     return out[: int(expected or 0)]
 
 
+# ---------------------------------------------------------------------------
+# Module-level API client / model caches.
+# Creating AsyncOpenAI/AsyncAnthropic on every request opens a new TCP
+# connection pool each time — very expensive under load.  Caching the
+# client objects reuses connections across concurrent requests.
+# ---------------------------------------------------------------------------
+_openai_clients: Dict[str, Any] = {}
+_anthropic_clients: Dict[str, Any] = {}
+_gemini_models: Dict[str, Any] = {}
+
+
+def _get_openai_client(api_key: str) -> Any:
+    client = _openai_clients.get(api_key)
+    if client is None:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=api_key)
+        _openai_clients[api_key] = client
+    return client
+
+
+def _get_anthropic_client(api_key: str) -> Any:
+    client = _anthropic_clients.get(api_key)
+    if client is None:
+        from anthropic import AsyncAnthropic
+        client = AsyncAnthropic(api_key=api_key)
+        _anthropic_clients[api_key] = client
+    return client
+
+
+def _get_gemini_model(api_key: str, model_name: str) -> Any:
+    cache_key = f"{api_key}:{model_name}"
+    model = _gemini_models.get(cache_key)
+    if model is None:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+        _gemini_models[cache_key] = model
+    return model
+
+
 @dataclass
 class AIService:
     provider: str = AI_PROVIDER
@@ -987,6 +1027,38 @@ class AIService:
             raise AIServiceError("OPENAI_API_KEY bor, lekin OpenAI kalitiga o'xshamaydi (sk-...).")
         raise AIServiceError("OPENAI_API_KEY, CLAUDE_API_KEY yoki GEMINI_API_KEY ni .env da sozlang.")
 
+    @staticmethod
+    def _split_text_chunks(text: str, n: int, min_chunk: int = 1500) -> List[str]:
+        """Split text into up to n roughly-equal chunks at paragraph/sentence boundaries.
+
+        If the text is too short to meaningfully split, returns [text] so all
+        parallel calls get the full context (different random seeds will still
+        produce some variety).
+        """
+        if n <= 1 or len(text) < n * min_chunk:
+            return [text]
+        chunk_size = len(text) // n
+        chunks: List[str] = []
+        start = 0
+        for i in range(n):
+            if i == n - 1:
+                chunks.append(text[start:])
+                break
+            end = start + chunk_size
+            # Prefer paragraph boundary; fall back to sentence boundary; then hard cut.
+            boundary = text.rfind("\n\n", start + min_chunk // 2, end + 300)
+            if boundary <= start:
+                boundary = text.rfind("\n", start + min_chunk // 2, end + 300)
+            if boundary <= start:
+                boundary = text.rfind(". ", start + min_chunk // 2, end + 300)
+                if boundary > start:
+                    boundary += 1
+            if boundary <= start:
+                boundary = end
+            chunks.append(text[start:boundary])
+            start = boundary
+        return [c for c in chunks if c.strip()]
+
     async def generate_quiz_from_text(
         self,
         text: str,
@@ -1047,44 +1119,50 @@ class AIService:
         if diff_extra:
             extra0 = (diff_extra + ("\n\n" + extra0 if extra0 else "")).strip()
 
+        # Larger batches = fewer round-trips = faster completion.
+        # OpenAI handles 15-question JSON reliably; Gemini flash handles 20.
         default_batch_size = 10
         if question_count >= 25:
-            default_batch_size = 12
+            default_batch_size = 15
         if question_count >= 40:
-            default_batch_size = 14
+            default_batch_size = 20
         if provider == "openai" and question_count >= 25:
-            default_batch_size = 8
+            default_batch_size = 15
         if provider == "openai" and question_count >= 40:
-            default_batch_size = 6
+            default_batch_size = 15
         batch_size = int(os.getenv("AI_BATCH_SIZE", str(default_batch_size)) or default_batch_size)
-        batch_size = max(1, min(20, batch_size))
+        batch_size = max(1, min(25, batch_size))
 
-        if provider == "openai":
-            questions = await self._generate_openai(
-                cleaned,
-                min(question_count, batch_size),
-                lang_instruction=lang_instruction,
-                extra_instructions=extra0,
-                shuffle_options=shuffle_options,
-            )
-        elif provider == "claude":
-            questions = await self._generate_claude(
-                cleaned,
-                min(question_count, batch_size),
-                lang_instruction=lang_instruction,
-                extra_instructions=extra0,
-                shuffle_options=shuffle_options,
-            )
-        elif provider == "gemini":
-            questions = await self._generate_gemini(
-                cleaned,
-                min(question_count, batch_size),
-                lang_instruction=lang_instruction,
-                extra_instructions=extra0,
-                shuffle_options=shuffle_options,
-            )
-        else:
+        # Split text into chunks so each parallel call covers a DIFFERENT part of the
+        # document → fewer duplicate questions, faster responses (smaller context).
+        n_initial = max(1, min(6, math.ceil(question_count / batch_size)))
+        text_chunks = self._split_text_chunks(cleaned, n_initial, min_chunk=2000)
+
+        def _make_text_task(chunk: str, ask: int) -> Any:
+            if provider == "openai":
+                return self._generate_openai(chunk, ask, lang_instruction=lang_instruction, extra_instructions=extra0, shuffle_options=shuffle_options)
+            if provider == "claude":
+                return self._generate_claude(chunk, ask, lang_instruction=lang_instruction, extra_instructions=extra0, shuffle_options=shuffle_options)
+            if provider == "gemini":
+                return self._generate_gemini(chunk, ask, lang_instruction=lang_instruction, extra_instructions=extra0, shuffle_options=shuffle_options)
             raise AIServiceError(f"Unknown AI provider: {provider}")
+
+        # Assign each initial batch a (possibly different) text chunk.
+        init_tasks = [
+            _make_text_task(text_chunks[i % len(text_chunks)], min(batch_size, question_count))
+            for i in range(n_initial)
+        ]
+        init_results = await asyncio.gather(*init_tasks, return_exceptions=True)
+
+        first_exc: Optional[BaseException] = None
+        questions: List[Dict[str, Any]] = []
+        for r in init_results:
+            if isinstance(r, BaseException):
+                first_exc = first_exc or r
+            else:
+                questions.extend(r)
+        if not questions and first_exc is not None:
+            raise first_exc
 
         uniq: List[Dict[str, Any]] = []
         seen = set()
@@ -1095,19 +1173,16 @@ class AIService:
             seen.add(key)
             uniq.append(q)
 
-        # If the model returned fewer than requested, try to fill the gap (bounded retries).
+        # Fill loop: keep going until we reach question_count or exhaust the budget.
         started = time.monotonic()
-        default_budget = 90
+        default_budget = 120
         if question_count >= 40:
-            default_budget = 120
-        if provider == "openai" and question_count >= 40:
-            default_budget = 150
+            default_budget = 240
         fill_budget_sec = int(os.getenv("AI_TEXT_TOTAL_BUDGET_SEC", str(default_budget)) or default_budget)
         fill_budget_sec = max(10, min(600, fill_budget_sec))
 
         max_retries = int(os.getenv("AI_FILL_RETRIES", "4") or 4)
         max_retries = max(0, min(8, max_retries))
-        # Allow enough attempts for big counts; otherwise we might silently return far fewer questions.
         max_iters = max(
             max_retries + (question_count + batch_size - 1) // batch_size,
             (question_count * 2 + batch_size - 1) // batch_size,
@@ -1122,10 +1197,6 @@ class AIService:
                 break
 
             parallel_default = 2 if question_count < 25 else 3
-            if provider == "openai" and question_count >= 25:
-                parallel_default = 2
-            if provider == "openai" and question_count >= 40:
-                parallel_default = 1
             parallel = int(
                 os.getenv(
                     "AI_PARALLEL_BATCHES_TEXT",
@@ -1135,7 +1206,7 @@ class AIService:
             )
             parallel = max(1, min(5, parallel))
 
-            avoid = "\n".join(f"- {q['question']}" for q in uniq[:12] if q.get("question"))
+            avoid = "\n".join(f"- {q['question']}" for q in uniq[:15] if q.get("question"))
             extra = "Quyidagi savollarni takrorlamang:\n" + avoid if avoid else ""
 
             if topic_extra:
@@ -1143,25 +1214,28 @@ class AIService:
             if diff_extra:
                 extra = (diff_extra + ("\n\n" + extra if extra else "")).strip()
 
+            # Rotate through text chunks in fill loop too.
             tasks = []
             to_ask = remaining
-            for _ in range(parallel):
+            for j in range(parallel):
                 if to_ask <= 0:
                     break
                 ask = min(to_ask, batch_size)
                 to_ask -= ask
+                chunk = text_chunks[(tries + j) % len(text_chunks)]
                 if provider == "openai":
-                    tasks.append(self._generate_openai(cleaned, ask, lang_instruction=lang_instruction, extra_instructions=extra, shuffle_options=shuffle_options))
+                    tasks.append(self._generate_openai(chunk, ask, lang_instruction=lang_instruction, extra_instructions=extra, shuffle_options=shuffle_options))
                 elif provider == "claude":
-                    tasks.append(self._generate_claude(cleaned, ask, lang_instruction=lang_instruction, extra_instructions=extra, shuffle_options=shuffle_options))
+                    tasks.append(self._generate_claude(chunk, ask, lang_instruction=lang_instruction, extra_instructions=extra, shuffle_options=shuffle_options))
                 else:
-                    tasks.append(self._generate_gemini(cleaned, ask, lang_instruction=lang_instruction, extra_instructions=extra, shuffle_options=shuffle_options))
+                    tasks.append(self._generate_gemini(chunk, ask, lang_instruction=lang_instruction, extra_instructions=extra, shuffle_options=shuffle_options))
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
             more_all = []
             for res in results:
-                if isinstance(res, Exception):
-                    raise res
+                if isinstance(res, BaseException):
+                    first_exc = first_exc or res
+                    continue  # skip failed batch, keep going
                 more_all.extend(res)
 
             for q in more_all:
@@ -1199,7 +1273,8 @@ class AIService:
         review_max_chars = int(os.getenv("AI_REVIEW_MAX_TEXT_CHARS", "16000") or 16000)
         review_max_chars = max(4000, min(50000, review_max_chars))
 
-        reviewed: List[Dict[str, Any]] = []
+        # Build (batch, relevant_text) pairs synchronously — _extract_relevant_text is cheap.
+        batch_pairs: List[tuple] = []
         for start in range(0, len(questions), review_batch):
             batch = [dict(q or {}) for q in questions[start : start + review_batch]]
             keywords: List[str] = []
@@ -1213,27 +1288,27 @@ class AIService:
                         keywords.append(str(opt))
             topic_blob = " ".join(keywords)
             relevant_text = _extract_relevant_text(source, topic_blob, max_chars=review_max_chars)
-            if provider == "openai":
-                fixes = await self._review_openai_answers(
-                    relevant_text,
-                    batch,
-                    output_language=output_language,
-                )
-            elif provider == "claude":
-                fixes = await self._review_claude_answers(
-                    relevant_text,
-                    batch,
-                    output_language=output_language,
-                )
-            elif provider == "gemini":
-                fixes = await self._review_gemini_answers(
-                    relevant_text,
-                    batch,
-                    output_language=output_language,
-                )
-            else:
-                fixes = [{} for _ in batch]
+            batch_pairs.append((batch, relevant_text))
 
+        # Launch ALL review batches in parallel — biggest speed-up for multi-batch quizzes.
+        async def _review_one(batch: List[Dict], rel_text: str) -> List[Dict]:
+            if provider == "openai":
+                return await self._review_openai_answers(rel_text, batch, output_language=output_language)
+            if provider == "claude":
+                return await self._review_claude_answers(rel_text, batch, output_language=output_language)
+            if provider == "gemini":
+                return await self._review_gemini_answers(rel_text, batch, output_language=output_language)
+            return [{} for _ in batch]
+
+        all_fixes = await asyncio.gather(
+            *[_review_one(b, t) for b, t in batch_pairs],
+            return_exceptions=True,
+        )
+
+        reviewed: List[Dict[str, Any]] = []
+        for (batch, _), fixes in zip(batch_pairs, all_fixes):
+            if isinstance(fixes, BaseException):
+                fixes = [{} for _ in batch]
             for idx, original in enumerate(batch):
                 fix = fixes[idx] if idx < len(fixes) else {}
                 corrected = dict(original)
@@ -1275,32 +1350,30 @@ class AIService:
         batch_size = int(os.getenv("AI_BATCH_SIZE", str(default_batch_size)) or default_batch_size)
         batch_size = max(1, min(20, batch_size))
 
-        if provider == "openai":
-            questions = await self._generate_openai_topic(
-                topic,
-                min(question_count, batch_size),
-                lang_instruction=lang_instruction,
-                extra_instructions=(intent_extra + "\n\n" + coverage_extra_topic + ("\n\n" + diff_extra_topic if diff_extra_topic else "")).strip(),
-                shuffle_options=shuffle_options,
-            )
-        elif provider == "claude":
-            questions = await self._generate_claude_topic(
-                topic,
-                min(question_count, batch_size),
-                lang_instruction=lang_instruction,
-                extra_instructions=(intent_extra + "\n\n" + coverage_extra_topic + ("\n\n" + diff_extra_topic if diff_extra_topic else "")).strip(),
-                shuffle_options=shuffle_options,
-            )
-        elif provider == "gemini":
-            questions = await self._generate_gemini_topic(
-                topic,
-                min(question_count, batch_size),
-                lang_instruction=lang_instruction,
-                extra_instructions=(intent_extra + "\n\n" + coverage_extra_topic + ("\n\n" + diff_extra_topic if diff_extra_topic else "")).strip(),
-                shuffle_options=shuffle_options,
-            )
-        else:
+        extra0 = (intent_extra + "\n\n" + coverage_extra_topic + ("\n\n" + diff_extra_topic if diff_extra_topic else "")).strip()
+
+        def _make_topic_task(ask: int) -> Any:
+            if provider == "openai":
+                return self._generate_openai_topic(topic, ask, lang_instruction=lang_instruction, extra_instructions=extra0, shuffle_options=shuffle_options)
+            if provider == "claude":
+                return self._generate_claude_topic(topic, ask, lang_instruction=lang_instruction, extra_instructions=extra0, shuffle_options=shuffle_options)
+            if provider == "gemini":
+                return self._generate_gemini_topic(topic, ask, lang_instruction=lang_instruction, extra_instructions=extra0, shuffle_options=shuffle_options)
             raise AIServiceError(f"Unknown AI provider: {provider}")
+
+        n_initial = max(1, min(4, math.ceil(question_count / batch_size)))
+        init_tasks = [_make_topic_task(min(batch_size, question_count)) for _ in range(n_initial)]
+        init_results = await asyncio.gather(*init_tasks, return_exceptions=True)
+
+        first_exc: Optional[BaseException] = None
+        questions: List[Dict[str, Any]] = []
+        for r in init_results:
+            if isinstance(r, BaseException):
+                first_exc = first_exc or r
+            else:
+                questions.extend(r)
+        if not questions and first_exc is not None:
+            raise first_exc
 
         uniq: List[Dict[str, Any]] = []
         seen = set()
@@ -1386,8 +1459,8 @@ class AIService:
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for res in results:
-                if isinstance(res, Exception):
-                    raise res
+                if isinstance(res, BaseException):
+                    continue  # skip failed batch, keep going
                 for q in res:
                     key = str(q.get("question") or "").strip().lower()
                     if not key or key in seen:
@@ -1416,13 +1489,17 @@ class AIService:
 
         lang_instruction = _language_instruction(output_language)
 
+        if provider == "openai":
+            tasks = [self._generate_openai_image(p, lang_instruction=lang_instruction, shuffle_options=shuffle_options) for p in paths]
+        else:
+            tasks = [self._generate_gemini_image(p, lang_instruction=lang_instruction, shuffle_options=shuffle_options) for p in paths]
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         out: List[Dict[str, Any]] = []
-        for p in paths:
-            if provider == "openai":
-                q = await self._generate_openai_image(p, lang_instruction=lang_instruction, shuffle_options=shuffle_options)
-            else:
-                q = await self._generate_gemini_image(p, lang_instruction=lang_instruction, shuffle_options=shuffle_options)
-            out.append(q)
+        for r in results:
+            if isinstance(r, BaseException):
+                raise r
+            out.append(r)
         return out
 
     async def extract_quiz_from_images(
@@ -1449,39 +1526,32 @@ class AIService:
         limit_total = max(1, int(max_questions or 1))
         lang_instruction = _language_instruction(output_language)
 
-        out: List[Dict[str, Any]] = []
-        for p in paths:
-            if len(out) >= limit_total:
-                break
-            remaining = limit_total - len(out)
+        async def _extract_page(p: str) -> List[Dict[str, Any]]:
             if provider == "openai":
-                page_questions = await self._extract_openai_image_quiz(
-                    p,
-                    lang_instruction=lang_instruction,
-                    max_questions=remaining,
-                    shuffle_options=shuffle_options,
-                )
+                page_questions = await self._extract_openai_image_quiz(p, lang_instruction=lang_instruction, max_questions=limit_total, shuffle_options=shuffle_options)
             else:
-                page_questions = await self._extract_gemini_image_quiz(
-                    p,
-                    lang_instruction=lang_instruction,
-                    max_questions=remaining,
-                    shuffle_options=shuffle_options,
-                )
-
+                page_questions = await self._extract_gemini_image_quiz(p, lang_instruction=lang_instruction, max_questions=limit_total, shuffle_options=shuffle_options)
             if not page_questions:
-                # Fallback: still try to get at least one usable question from the page.
                 if provider == "openai":
                     one = await self._generate_openai_image(p, lang_instruction=lang_instruction, shuffle_options=shuffle_options)
                 else:
                     one = await self._generate_gemini_image(p, lang_instruction=lang_instruction, shuffle_options=shuffle_options)
                 page_questions = [one]
-
-            for q in page_questions[:remaining]:
+            for q in page_questions:
                 q["image_path"] = p
+            return page_questions
+
+        page_results = await asyncio.gather(*[_extract_page(p) for p in paths], return_exceptions=True)
+        out: List[Dict[str, Any]] = []
+        for r in page_results:
+            if isinstance(r, BaseException):
+                raise r
+            for q in r:
                 out.append(q)
                 if len(out) >= limit_total:
                     break
+            if len(out) >= limit_total:
+                break
 
         return out[:limit_total]
 
@@ -1523,7 +1593,7 @@ class AIService:
             if not self.openai_api_key:
                 raise AIServiceError("OPENAI_API_KEY is not set")
 
-            client = AsyncOpenAI(api_key=self.openai_api_key)
+            client = _get_openai_client(self.openai_api_key)
             total_timeout = float(os.getenv("OPENAI_TOTAL_TIMEOUT_SEC", "0") or 0)
             if total_timeout <= 0:
                 total_timeout = min(120.0, timeout_sec + 20.0)
@@ -1568,14 +1638,13 @@ class AIService:
         if not self.gemini_api_key:
             raise AIServiceError("GEMINI_API_KEY is not set")
 
-        genai.configure(api_key=self.gemini_api_key)
         model_name = (self.gemini_model or "").strip()
         if not model_name:
             raise AIServiceError("GEMINI_MODEL bo'sh. .env da GEMINI_MODEL=... qo'ying.")
         if model_name.startswith("models/"):
             model_name = model_name.split("/", 1)[1]
 
-        model = genai.GenerativeModel(model_name)
+        model = _get_gemini_model(self.gemini_api_key, model_name)
         prompt = f"{system_prompt}\\n\\nRECEIPT_TEXT:\\n{text}".strip()
 
         def _call() -> str:
@@ -1650,14 +1719,13 @@ class AIService:
         except ImportError as exc:
             raise AIServiceError("google-generativeai not installed. Install: pip install google-generativeai") from exc
 
-        genai.configure(api_key=self.gemini_api_key)
         model_name = (self.gemini_model or "").strip()
         if not model_name:
             raise AIServiceError("GEMINI_MODEL bo'sh. .env da GEMINI_MODEL=... qo'ying.")
         if model_name.startswith("models/"):
             model_name = model_name.split("/", 1)[1]
 
-        model = genai.GenerativeModel(model_name)
+        model = _get_gemini_model(self.gemini_api_key, model_name)
 
         def _call() -> str:
             uploaded = None
@@ -1719,7 +1787,7 @@ class AIService:
         if not self.openai_api_key:
             raise AIServiceError("OPENAI_API_KEY is not set")
 
-        client = AsyncOpenAI(api_key=self.openai_api_key)
+        client = _get_openai_client(self.openai_api_key)
 
         timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", os.getenv("AI_REQUEST_TIMEOUT_SEC", "60")) or 60)
         timeout_sec = max(5.0, min(600.0, timeout_sec))
@@ -1801,7 +1869,7 @@ class AIService:
         if not self.openai_api_key:
             raise AIServiceError("OPENAI_API_KEY is not set")
 
-        client = AsyncOpenAI(api_key=self.openai_api_key)
+        client = _get_openai_client(self.openai_api_key)
         total_timeout = float(os.getenv("OPENAI_REVIEW_TIMEOUT_SEC", "45") or 45)
         total_timeout = max(10.0, min(180.0, total_timeout))
         lang_instruction = _language_instruction(output_language)
@@ -1868,7 +1936,7 @@ class AIService:
         if not self.claude_api_key:
             raise AIServiceError("CLAUDE_API_KEY is not set")
 
-        client = AsyncAnthropic(api_key=self.claude_api_key)
+        client = _get_anthropic_client(self.claude_api_key)
         model_name = _normalize_claude_model_name(self.claude_model)
         timeout_sec = float(os.getenv("CLAUDE_TIMEOUT_SEC", os.getenv("AI_REQUEST_TIMEOUT_SEC", "90")) or 90)
         timeout_sec = max(10.0, min(300.0, timeout_sec))
@@ -1932,7 +2000,7 @@ class AIService:
         if not self.claude_api_key:
             raise AIServiceError("CLAUDE_API_KEY is not set")
 
-        client = AsyncAnthropic(api_key=self.claude_api_key)
+        client = _get_anthropic_client(self.claude_api_key)
         model_name = _normalize_claude_model_name(self.claude_model)
         lang_instruction = _language_instruction(output_language)
         payload = json.dumps(
@@ -1991,7 +2059,7 @@ class AIService:
         if not self.claude_api_key:
             raise AIServiceError("CLAUDE_API_KEY is not set")
 
-        client = AsyncAnthropic(api_key=self.claude_api_key)
+        client = _get_anthropic_client(self.claude_api_key)
         model_name = _normalize_claude_model_name(self.claude_model)
         timeout_sec = float(os.getenv("CLAUDE_TIMEOUT_SEC", os.getenv("AI_REQUEST_TIMEOUT_SEC", "90")) or 90)
         timeout_sec = max(10.0, min(300.0, timeout_sec))
@@ -2052,7 +2120,7 @@ Natijani faqat JSON ko'rinishida qaytar: {{"quiz": [...]}}."""
         if not self.openai_api_key:
             raise AIServiceError("OPENAI_API_KEY is not set")
 
-        client = AsyncOpenAI(api_key=self.openai_api_key)
+        client = _get_openai_client(self.openai_api_key)
 
         timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", os.getenv("AI_REQUEST_TIMEOUT_SEC", "60")) or 60)
         timeout_sec = max(5.0, min(600.0, timeout_sec))
@@ -2154,7 +2222,7 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
         if model_name.startswith("models/"):
             model_name = model_name.split("/", 1)[1]
 
-        model = genai.GenerativeModel(model_name)
+        model = _get_gemini_model(self.gemini_api_key, model_name)
 
         timeout_sec = int(os.getenv("GEMINI_TIMEOUT_SEC", os.getenv("AI_REQUEST_TIMEOUT_SEC", "60")) or 60)
         timeout_sec = max(5, min(300, timeout_sec))
@@ -2265,14 +2333,13 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
         if not self.gemini_api_key:
             raise AIServiceError("GEMINI_API_KEY is not set")
 
-        genai.configure(api_key=self.gemini_api_key)
         model_name = (self.gemini_model or "").strip()
         if not model_name:
             raise AIServiceError("GEMINI_MODEL bo'sh. .env da GEMINI_MODEL=... qo'ying.")
         if model_name.startswith("models/"):
             model_name = model_name.split("/", 1)[1]
 
-        model = genai.GenerativeModel(model_name)
+        model = _get_gemini_model(self.gemini_api_key, model_name)
         lang_instruction = _language_instruction(output_language)
         payload = json.dumps(
             [
@@ -2339,14 +2406,13 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
         if not self.gemini_api_key:
             raise AIServiceError("GEMINI_API_KEY is not set")
 
-        genai.configure(api_key=self.gemini_api_key)
         model_name = (self.gemini_model or "").strip()
         if not model_name:
             raise AIServiceError("GEMINI_MODEL bo'sh. .env da GEMINI_MODEL=... qo'ying.")
         if model_name.startswith("models/"):
             model_name = model_name.split("/", 1)[1]
 
-        model = genai.GenerativeModel(model_name)
+        model = _get_gemini_model(self.gemini_api_key, model_name)
 
         timeout_sec = int(os.getenv("GEMINI_TIMEOUT_SEC", os.getenv("AI_REQUEST_TIMEOUT_SEC", "60")) or 60)
         timeout_sec = max(5, min(300, timeout_sec))
@@ -2477,7 +2543,7 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
 
         data_url = f"data:{mime};base64,{b64}"
 
-        client = AsyncOpenAI(api_key=self.openai_api_key)
+        client = _get_openai_client(self.openai_api_key)
 
         timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", os.getenv("AI_REQUEST_TIMEOUT_SEC", "60")) or 60)
         timeout_sec = max(5.0, min(600.0, timeout_sec))
@@ -2578,7 +2644,7 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
         b64 = base64.b64encode(p.read_bytes()).decode("ascii")
         data_url = f"data:{mime};base64,{b64}"
 
-        client = AsyncOpenAI(api_key=self.openai_api_key)
+        client = _get_openai_client(self.openai_api_key)
         timeout_sec = float(os.getenv("OPENAI_TIMEOUT_SEC", os.getenv("AI_REQUEST_TIMEOUT_SEC", "60")) or 60)
         timeout_sec = max(5.0, min(600.0, timeout_sec))
         total_timeout = float(os.getenv("OPENAI_TOTAL_TIMEOUT_SEC", "0") or 0)
@@ -2647,14 +2713,13 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
         if not self.gemini_api_key:
             raise AIServiceError("GEMINI_API_KEY is not set")
 
-        genai.configure(api_key=self.gemini_api_key)
         model_name = (self.gemini_model or "").strip()
         if not model_name:
             raise AIServiceError("GEMINI_MODEL bo'sh. .env da GEMINI_MODEL=... qo'ying.")
         if model_name.startswith("models/"):
             model_name = model_name.split("/", 1)[1]
 
-        model = genai.GenerativeModel(model_name)
+        model = _get_gemini_model(self.gemini_api_key, model_name)
 
         timeout_sec = int(os.getenv("GEMINI_TIMEOUT_SEC", os.getenv("AI_REQUEST_TIMEOUT_SEC", "60")) or 60)
         timeout_sec = max(5, min(300, timeout_sec))
@@ -2769,14 +2834,13 @@ Har element: {{\"question\": \"...\", \"options\": [\"A\",\"B\",\"C\",\"D\"], \"
         if not self.gemini_api_key:
             raise AIServiceError("GEMINI_API_KEY is not set")
 
-        genai.configure(api_key=self.gemini_api_key)
         model_name = (self.gemini_model or "").strip()
         if not model_name:
             raise AIServiceError("GEMINI_MODEL bo'sh. .env da GEMINI_MODEL=... qo'ying.")
         if model_name.startswith("models/"):
             model_name = model_name.split("/", 1)[1]
 
-        model = genai.GenerativeModel(model_name)
+        model = _get_gemini_model(self.gemini_api_key, model_name)
         timeout_sec = int(os.getenv("GEMINI_TIMEOUT_SEC", os.getenv("AI_REQUEST_TIMEOUT_SEC", "60")) or 60)
         timeout_sec = max(5, min(300, timeout_sec))
         total_timeout = int(os.getenv("GEMINI_TOTAL_TIMEOUT_SEC", str(timeout_sec + 30)) or (timeout_sec + 30))

@@ -71,6 +71,8 @@
   "edit_title_prompt": "새 제목을 보내세요:",
   "err_ai": "오류: {err}",
   "err_unexpected": "예상치 못한 오류: {err}",
+  "err_rate_limit": "AI 서비스 요청 한도에 도달했습니다. 1-2분 후 다시 시도해 주세요.",
+  "err_unexpected_safe": "예상치 못한 오류가 발생했습니다. 잠시 기다린 후 다시 시도해 주세요.",
   "error_short": "오류.",
   "explanation_prefix": "해설: {text}",
   "extracting_text": "텍스트를 추출하는 중...",

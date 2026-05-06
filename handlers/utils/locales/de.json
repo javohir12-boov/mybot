@@ -71,6 +71,8 @@
   "edit_title_prompt": "Sende den neuen Titel:",
   "err_ai": "Fehler: {err}",
   "err_unexpected": "Unerwarteter Fehler: {err}",
+  "err_rate_limit": "Das KI-Limit wurde erreicht. Bitte in 1-2 Minuten erneut versuchen.",
+  "err_unexpected_safe": "Ein unerwarteter Fehler ist aufgetreten. Bitte warten Sie kurz und versuchen Sie es erneut.",
   "error_short": "Fehler.",
   "explanation_prefix": "Erklärung: {text}",
   "extracting_text": "Text wird extrahiert...",

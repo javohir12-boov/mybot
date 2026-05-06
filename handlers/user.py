@@ -1,4 +1,5 @@
 ﻿import asyncio
+import gc
 import html
 import json
 import os
@@ -6721,6 +6722,12 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
             except Exception:
                 pass
         await state.clear()
+        # Free memory after large file/AI processing — important on 512MB hosts (Render free).
+        try:
+            text = ""  # release the source text reference
+            gc.collect()
+        except Exception:
+            pass
 
 
 

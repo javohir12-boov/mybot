@@ -202,12 +202,15 @@ def _build_engine():
     if drivername.startswith('sqlite'):
         engine_kwargs['connect_args'] = {'timeout': 30}
 
-        async def _set_wal(conn: Any) -> None:
-            await conn.execute('PRAGMA journal_mode=WAL')
-            await conn.execute('PRAGMA synchronous=NORMAL')
-            await conn.execute('PRAGMA cache_size=-65536')  # 64 MB page cache
+        # Cache size in KiB (negative = KiB). Default 8 MiB — keeps memory low on
+        # 512 MB free-tier hosts (Render/Fly free). Override via SQLITE_CACHE_KB.
+        try:
+            sqlite_cache_kb = int(os.getenv('SQLITE_CACHE_KB', '8192') or 8192)
+        except Exception:
+            sqlite_cache_kb = 8192
+        sqlite_cache_kb = max(1024, min(131072, sqlite_cache_kb))
+        cache_pragma = f'PRAGMA cache_size=-{sqlite_cache_kb}'
 
-        engine_kwargs['connect_args'] = {'timeout': 30}
         engine = create_async_engine(url_raw, **engine_kwargs)
         from sqlalchemy import event as sa_event
 
@@ -215,7 +218,7 @@ def _build_engine():
         def _on_connect(dbapi_conn: Any, _: Any) -> None:
             dbapi_conn.execute('PRAGMA journal_mode=WAL')
             dbapi_conn.execute('PRAGMA synchronous=NORMAL')
-            dbapi_conn.execute('PRAGMA cache_size=-65536')
+            dbapi_conn.execute(cache_pragma)
 
         return engine
 
@@ -223,16 +226,30 @@ def _build_engine():
     if drivername.startswith('postgresql+asyncpg'):
         q = dict(getattr(url, 'query', {}) or {})
 
-        sslmode = str(os.getenv('DB_SSLMODE', '') or q.pop('sslmode', '') or '').strip()
+        # Auto-default to sslmode=require for cloud-hosted Postgres (Render, Railway, Fly, etc.).
+        # Local databases (localhost, 127.0.0.1) skip SSL by default.
+        # Railway internal hostnames (*.railway.internal) are on a private network and
+        # also support SSL — keeping require is safe.
+        host = str(getattr(url, 'host', '') or '').lower()
+        is_local = host in {'', 'localhost', '127.0.0.1', '::1'}
+        is_render = bool(os.getenv('RENDER') or os.getenv('IS_PULL_REQUEST'))
+        is_railway = bool(
+            os.getenv('RAILWAY_PROJECT_ID')
+            or os.getenv('RAILWAY_ENVIRONMENT')
+            or os.getenv('RAILWAY_SERVICE_NAME')
+        )
+        default_sslmode = 'require' if (is_render or is_railway or not is_local) else ''
+        sslmode = str(os.getenv('DB_SSLMODE', '') or q.pop('sslmode', '') or default_sslmode).strip()
         connect_args = {}
         if sslmode:
             connect_args.update(_asyncpg_ssl_args(sslmode))
 
-        # Pool tuning — raised defaults for 100k+ user deployments.
+        # Pool tuning — defaults sized for Render free tier (~20 connection cap).
+        # For larger deployments override DB_POOL_SIZE / DB_MAX_OVERFLOW.
         try:
             engine_kwargs['pool_pre_ping'] = True
-            engine_kwargs['pool_size'] = int(os.getenv('DB_POOL_SIZE', '20') or 20)
-            engine_kwargs['max_overflow'] = int(os.getenv('DB_MAX_OVERFLOW', '40') or 40)
+            engine_kwargs['pool_size'] = int(os.getenv('DB_POOL_SIZE', '5') or 5)
+            engine_kwargs['max_overflow'] = int(os.getenv('DB_MAX_OVERFLOW', '10') or 10)
             engine_kwargs['pool_timeout'] = int(os.getenv('DB_POOL_TIMEOUT', '30') or 30)
             engine_kwargs['pool_recycle'] = int(os.getenv('DB_POOL_RECYCLE', '1800') or 1800)
         except Exception:

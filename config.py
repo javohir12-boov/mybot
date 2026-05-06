@@ -69,15 +69,41 @@ if BOT_MODE not in {"ai", "noai"}:
     BOT_MODE = "ai"
 AI_ENABLED = BOT_MODE != "noai"
 
-# MA'LUMOTLAR BAZASI MANZILI (Xatoni tuzatuvchi asosiy qator)
+# MA'LUMOTLAR BAZASI MANZILI
+# Railway/Render/Heroku DATABASE_URL ni quyidagi ko'rinishda berishi mumkin:
+#   postgres://...  yoki  postgresql://...
+# SQLAlchemy async esa postgresql+asyncpg:// formatini kutadi.
 _DATABASE_URL_RAW = _get_env("DATABASE_URL", "sqlite+aiosqlite:///quiz_bot.db")
-# Render provides postgres://... but SQLAlchemy async needs postgresql+asyncpg://
 _db = str(_DATABASE_URL_RAW or '').strip()
-if _db.startswith('postgres://'):
-    _db = _db.replace('postgres://', 'postgresql+asyncpg://', 1)
-elif _db.startswith('postgresql://') and ('+' not in _db):
-    _db = _db.replace('postgresql://', 'postgresql+asyncpg://', 1)
+# Faqat scheme qismini (://gacha) tekshiramiz — parol yoki query string'da
+# bo'lishi mumkin bo'lgan '+' belgisi noto'g'ri o'zgartirishga olib kelmasligi uchun.
+_scheme_sep = _db.find('://')
+_scheme = _db[:_scheme_sep].lower() if _scheme_sep > 0 else ''
+_rest = _db[_scheme_sep + 3:] if _scheme_sep > 0 else ''
+if _scheme == 'postgres' or _scheme == 'postgresql':
+    _db = 'postgresql+asyncpg://' + _rest
+# Agar foydalanuvchi 'postgresql+psycopg2://' yoki boshqa sync driver ishlatgan bo'lsa,
+# uni ham asyncpg'ga aylantiramiz (chunki kodimiz async engine ishlatadi).
+elif _scheme.startswith('postgresql+') and not _scheme.endswith('+asyncpg'):
+    _db = 'postgresql+asyncpg://' + _rest
 DATABASE_URL = _db or 'sqlite+aiosqlite:///quiz_bot.db'
+
+# Print which DB scheme we're using (mask credentials) — helps debug Railway/Render setup.
+def _mask_db_url(u: str) -> str:
+    try:
+        if '://' not in u:
+            return u
+        scheme, rest = u.split('://', 1)
+        if '@' in rest:
+            _, hostpart = rest.rsplit('@', 1)
+            return f"{scheme}://****@{hostpart}"
+        return u
+    except Exception:
+        return "<unprintable>"
+
+import sys as _sys
+print(f"[config] DATABASE_URL = {_mask_db_url(DATABASE_URL)}", file=_sys.stderr)
+
 SQL_ECHO = str(_get_env("SQL_ECHO", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 SQL_PASSWORD = _get_env("SQL_PASSWORD", "0000")

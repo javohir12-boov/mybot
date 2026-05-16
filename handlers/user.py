@@ -1301,8 +1301,10 @@ async def _start_saved_quiz(
     # Cancel user's previous runs in this chat to avoid confusion.
     await _cancel_user_runs(bot, chat_id=chat_id, user_id=user.id)
     # Only one active test per chat to avoid chaos in groups.
+    # A run in the lobby state (started=False, waiting for Join/Start) does NOT
+    # count as active — only runs that have actually begun sending questions do.
     for existing in list(_ACTIVE_RUNS.values()):
-        if existing.chat_id == chat_id and not existing.cancelled:
+        if existing.chat_id == chat_id and not existing.cancelled and existing.started:
             await bot.send_message(chat_id, t(ui_lang, "chat_has_active_quiz"))
             return
 

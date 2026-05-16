@@ -973,6 +973,7 @@ async def get_quiz_attempt_stats(quiz_id: int, limit: int = 30) -> List[dict]:
 
 
 async def list_user_quizzes(user_id: int, limit: int = 20) -> List[dict]:
+    uid = int(user_id or 0)
     async with async_session() as session:
         stmt = (
             select(
@@ -982,13 +983,13 @@ async def list_user_quizzes(user_id: int, limit: int = 20) -> List[dict]:
                 func.count(Question.id).label("question_count"),
             )
             .outerjoin(Question, Question.quiz_id == Quiz.id)
-            .where(Quiz.creator_id == user_id)
-            .group_by(Quiz.id)
+            .where(Quiz.creator_id == uid)
+            .group_by(Quiz.id, Quiz.title, Quiz.is_ai_generated)
             .order_by(desc(Quiz.id))
             .limit(limit)
         )
         rows = (await session.execute(stmt)).all()
-        return [
+        result = [
             {
                 "id": int(r.id),
                 "title": r.title or "",
@@ -997,6 +998,18 @@ async def list_user_quizzes(user_id: int, limit: int = 20) -> List[dict]:
             }
             for r in rows
         ]
+        # Diagnostic logging — helps debug "quizzes exist in stats but /mytests is empty".
+        if not result:
+            try:
+                total_in_db = int((await session.execute(select(func.count()).select_from(Quiz))).scalar() or 0)
+                distinct_creators = int((await session.execute(select(func.count(func.distinct(Quiz.creator_id))).select_from(Quiz))).scalar() or 0)
+                logging.warning(
+                    "list_user_quizzes: empty for user_id=%s — total quizzes in DB=%s, distinct creator_ids=%s",
+                    uid, total_in_db, distinct_creators,
+                )
+            except Exception:
+                pass
+        return result
 
 
 async def get_quiz_with_questions(quiz_id: int) -> Optional[dict]:
@@ -1085,7 +1098,7 @@ async def get_quiz_summary(quiz_id: int) -> Optional[dict]:
             )
             .outerjoin(Question, Question.quiz_id == Quiz.id)
             .where(Quiz.id == int(quiz_id))
-            .group_by(Quiz.id)
+            .group_by(Quiz.id, Quiz.title, Quiz.creator_id, Quiz.is_ai_generated, Quiz.open_period, Quiz.shuffle_mode, Quiz.shuffle_strategy)
         )
         row = (await session.execute(stmt)).first()
         if not row:

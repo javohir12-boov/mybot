@@ -145,6 +145,8 @@ class SecurityMiddleware(BaseMiddleware):
             if isinstance(event, types.CallbackQuery):
                 await event.answer(msg, show_alert=False)
             elif isinstance(event, types.Message):
+                if str(getattr(getattr(event, "chat", None), "type", "") or "").lower() in {"group", "supergroup"}:
+                    return
                 await event.answer(msg)
         except Exception:
             # Never fail the handler chain due to warning delivery.
@@ -245,7 +247,7 @@ class SecurityMiddleware(BaseMiddleware):
         try:
             if isinstance(event, types.CallbackQuery):
                 data = str(getattr(event, "data", "") or "")
-                return data == "menu_ui_language" or data.startswith("set_ui_lang:")
+                return data == "menu_ui_language" or data.startswith("set_ui_lang:") or data.startswith("start_set_ui_lang:")
             if isinstance(event, types.Message):
                 text = str(getattr(event, "text", "") or "").strip()
                 if not text.startswith("/"):

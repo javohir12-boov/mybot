@@ -94,8 +94,15 @@ def _mask_db_url(u: str) -> str:
         if '://' not in u:
             return u
         scheme, rest = u.split('://', 1)
+        # If the URL contains another scheme inside (e.g. ".../railwaypostgresql://..."),
+        # the env var has TWO URLs concatenated — flag this loudly.
+        if '://' in rest:
+            return f"!!! MALFORMED — TWO URLs concatenated in DATABASE_URL: {scheme}://...{rest[:60]}..."
+        # Multiple '@' usually means embedded credentials in the password part — also suspicious.
+        if rest.count('@') > 1:
+            return f"!!! SUSPICIOUS — multiple '@' in DATABASE_URL ({rest.count('@')} found). Possibly duplicated URL."
         if '@' in rest:
-            _, hostpart = rest.rsplit('@', 1)
+            _, hostpart = rest.split('@', 1)
             return f"{scheme}://****@{hostpart}"
         return u
     except Exception:

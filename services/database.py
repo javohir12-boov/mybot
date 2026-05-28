@@ -600,7 +600,52 @@ async def create_questions_bulk(quiz_id: int, questions: List[dict]) -> int:
     return len(objects)
 
 
+async def _connect_with_retry(max_attempts: int = 8, base_delay: float = 3.0) -> None:
+    """Wait until the database accepts connections.
+
+    Handles two common failure modes on Railway/Render:
+      - Internal DNS not yet propagated (getaddrinfo / "Name or service not known")
+      - Postgres still starting up (Connection refused / SSL reset)
+    Uses exponential backoff capped at 30s: 3s, 6s, 12s, 24s, 30s, 30s, 30s, 30s
+    """
+    import asyncio
+    last_exc: Optional[BaseException] = None
+    # Mask the host being targeted so the user can verify the URL is right.
+    try:
+        url_host = str(getattr(engine.url, 'host', '') or '?')
+        url_port = str(getattr(engine.url, 'port', '') or '?')
+    except Exception:
+        url_host, url_port = '?', '?'
+    logging.info("DB connect: targeting host=%s port=%s", url_host, url_port)
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with engine.connect() as conn:
+                await conn.exec_driver_sql("SELECT 1")
+            if attempt > 1:
+                logging.info("DB connected after %d attempts", attempt)
+            return
+        except Exception as exc:
+            last_exc = exc
+            msg = str(exc).lower()
+            is_dns = "getaddrinfo" in msg or "name or service" in msg or "nodename nor servname" in msg or "temporary failure in name resolution" in msg
+            kind = "DNS-not-ready" if is_dns else "conn-failed"
+            if attempt >= max_attempts:
+                break
+            delay = min(30.0, base_delay * (2 ** (attempt - 1)))
+            logging.warning(
+                "DB connect attempt %d/%d [%s] failed for host=%s: %s — retrying in %.1fs",
+                attempt, max_attempts, kind, url_host, exc, delay,
+            )
+            await asyncio.sleep(delay)
+    raise RuntimeError(
+        f"Could not connect to database after {max_attempts} attempts. "
+        f"Last error connecting to host='{url_host}' port='{url_port}': {last_exc}"
+    )
+
+
 async def init_db():
+    await _connect_with_retry()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         # Lightweight migrations for Postgres (handle Telegram IDs > int32).
@@ -972,28 +1017,74 @@ async def get_quiz_attempt_stats(quiz_id: int, limit: int = 30) -> List[dict]:
     return out[:limit]
 
 
-async def list_user_quizzes(user_id: int, limit: int = 20) -> List[dict]:
+async def get_user_latest_quiz_attempt(quiz_id: int, user_id: int) -> Optional[dict]:
+    quiz_id = int(quiz_id or 0)
+    user_id = int(user_id or 0)
+    if quiz_id <= 0 or user_id <= 0:
+        return None
+
+    async with async_session() as session:
+        stmt = (
+            select(
+                QuizAttempt.score,
+                QuizAttempt.answered,
+                QuizAttempt.total_time,
+                QuizAttempt.total_questions,
+                QuizAttempt.open_period,
+                QuizAttempt.finished,
+                QuizAttempt.completed_at,
+            )
+            .where(QuizAttempt.quiz_id == quiz_id)
+            .where(QuizAttempt.user_id == user_id)
+            .order_by(desc(QuizAttempt.id))
+            .limit(1)
+        )
+        row = (await session.execute(stmt)).first()
+
+    if not row:
+        return None
+    return {
+        "score": int(row.score or 0),
+        "answered": int(row.answered or 0),
+        "total_time": int(row.total_time or 0),
+        "total_questions": int(row.total_questions or 0),
+        "open_period": int(row.open_period or 0),
+        "finished": bool(row.finished),
+        "completed_at": str(row.completed_at or ""),
+    }
+
+
+async def list_user_quizzes(user_id: int, limit: int = 20, offset: int = 0, before_id: int = 0) -> List[dict]:
     uid = int(user_id or 0)
+    limit = max(1, int(limit or 20))
+    offset = max(0, int(offset or 0))
+    before_id = max(0, int(before_id or 0))
     async with async_session() as session:
         stmt = (
             select(
                 Quiz.id,
                 Quiz.title,
                 Quiz.is_ai_generated,
+                Quiz.open_period,
                 func.count(Question.id).label("question_count"),
             )
             .outerjoin(Question, Question.quiz_id == Quiz.id)
             .where(Quiz.creator_id == uid)
-            .group_by(Quiz.id, Quiz.title, Quiz.is_ai_generated)
+            .group_by(Quiz.id, Quiz.title, Quiz.is_ai_generated, Quiz.open_period)
             .order_by(desc(Quiz.id))
             .limit(limit)
         )
+        if before_id > 0:
+            stmt = stmt.where(Quiz.id < before_id)
+        elif offset > 0:
+            stmt = stmt.offset(offset)
         rows = (await session.execute(stmt)).all()
         result = [
             {
                 "id": int(r.id),
                 "title": r.title or "",
                 "is_ai_generated": bool(r.is_ai_generated),
+                "open_period": int(r.open_period or 30),
                 "question_count": int(r.question_count or 0),
             }
             for r in rows

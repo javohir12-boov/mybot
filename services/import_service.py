@@ -582,6 +582,74 @@ def _parse_quiz_unlabeled_blocks(text: str) -> List[Dict[str, Any]]:
     flush()
     return out
 
+
+def _parse_quiz_equal_hash_blocks(text: str) -> List[Dict[str, Any]]:
+    """Parser for the '====' / '#correct' / '++++' format common in Uzbek school tests.
+
+    Format:
+        1. Question text
+        ====
+        #Correct answer
+        ====
+        Wrong answer
+        ====
+        Wrong answer
+        ====
+        Wrong answer
+        ++++
+        2. Next question
+        ====
+        ...
+
+    Notes:
+      - '====' (any run of 3+ '=' chars) separates parts inside one question block.
+      - '++++' (any run of 3+ '+' chars) separates question blocks.
+      - The option starting with '#' is the correct answer; '#' is stripped from
+        the displayed option text. If no '#' marker is found, the first option
+        is assumed correct (a permissive fallback).
+      - Question text may begin with a numeric prefix like '1.' or '1)' which
+        will be stripped.
+    """
+    src = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not src:
+        return []
+
+    block_sep = re.compile(r"\n[ \t]*\+{3,}[ \t]*\n")
+    part_sep = re.compile(r"\n[ \t]*={3,}[ \t]*\n")
+    num_prefix = re.compile(r"^\s*\d+\s*[.\)]\s*")
+
+    out: List[Dict[str, Any]] = []
+    for block in block_sep.split(src):
+        block = block.strip()
+        if not block:
+            continue
+        parts = [p.strip() for p in part_sep.split(block) if p.strip()]
+        if len(parts) < 5:
+            continue
+        question = num_prefix.sub("", parts[0]).strip()
+        option_parts = parts[1:5]
+        options: List[str] = []
+        correct_index = -1
+        for i, opt in enumerate(option_parts):
+            stripped = opt.lstrip()
+            if stripped.startswith("#"):
+                stripped = stripped[1:].lstrip()
+                if correct_index < 0:
+                    correct_index = i
+            options.append(_compact_ws(stripped))
+        if correct_index < 0:
+            correct_index = 0
+        if not question or len(options) != 4 or not all(options):
+            continue
+        out.append({
+            "question": _compact_ws(question),
+            "options": options,
+            "correct_index": int(correct_index),
+            "explanation": "",
+        })
+    return out
+
+
 def parse_quiz_from_text(text: str) -> List[Dict[str, Any]]:
     lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
     out_raw: List[Dict[str, Any]] = []
@@ -836,7 +904,7 @@ def parse_quiz_payload(raw_text: str, *, title_fallback: str = "") -> Tuple[str,
     buckets: List[Dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
 
-    for parser in (parse_quiz_from_text, _parse_quiz_plus_minus, _parse_quiz_table_rows, _parse_quiz_unlabeled_blocks):
+    for parser in (_parse_quiz_equal_hash_blocks, parse_quiz_from_text, _parse_quiz_plus_minus, _parse_quiz_table_rows, _parse_quiz_unlabeled_blocks):
         try:
             parsed = parser(raw)
         except Exception:

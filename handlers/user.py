@@ -2,6 +2,7 @@
 import gc
 import html
 import json
+import math
 import os
 import random
 import re
@@ -44,6 +45,7 @@ from services.database import (
     get_quiz_attempt_stats,
     get_quiz_summary,
     get_quiz_with_questions,
+    get_user_latest_quiz_attempt,
     get_user_counts_summary,
     list_broadcast_group_chat_ids,
     list_broadcast_user_ids,
@@ -76,7 +78,8 @@ _PAYMENT_CARD_NUMBER = str(os.getenv('PAYMENT_CARD_NUMBER', '') or '').strip()
 _PAYMENT_CARD_HOLDER = str(os.getenv('PAYMENT_CARD_HOLDER', '') or '').strip()
 _TOPIC_MAX_CHARS = int(os.getenv('TOPIC_MAX_CHARS', '200') or 200)
 _PREMIUM_RECEIPT_AI = str(os.getenv('PREMIUM_RECEIPT_AI', '1') or '1').strip().lower() in {'1','true','yes','y','on'}
-_PREMIUM_RECEIPT_AUTOAPPROVE = str(os.getenv('PREMIUM_RECEIPT_AUTOAPPROVE', '1') or '1').strip().lower() in {'1','true','yes','y','on'}
+# Auto-approval by AI fully disabled — all premium requests go to admin for manual review.
+_PREMIUM_RECEIPT_AUTOAPPROVE = False
 try:
     _PREMIUM_RECEIPT_APPROVE_CONF = float(os.getenv('PREMIUM_RECEIPT_APPROVE_CONF', '0.9') or 0.9)
 except Exception:
@@ -122,7 +125,12 @@ _PENDING_AFTER_SUB: Dict[int, str] = {}
 _PENDING_AFTER_SUB_MAX = 20_000
 _MANUAL_CORRECT_LOCKS: Dict[int, asyncio.Lock] = {}
 _MANUAL_CORRECT_LOCKS_MAX = 10_000
-_START_LANG_PROMPT = "рџЊђ Interfeys tili / Interface language / РЇР·С‹Рє РёРЅС‚РµСЂС„РµР№СЃР°"
+_START_LANG_PROMPT = (
+    "Iltimos, botdan foydalanishni davom ettirish uchun interfeys tilini tanlang.\n\n"
+    "Пожалуйста, выберите язык интерфейса для продолжения работы с ботом.\n\n"
+    "Please select the interface language to continue using the bot."
+)
+_MYTESTS_PAGE_SIZE = 10
 
 
 def _subscription_gate_enabled() -> bool:
@@ -266,7 +274,41 @@ def _format_ai_error_text(ui_lang: str, exc: Exception) -> str:
     return t(ui_lang, "err_ai", err=err or t(ui_lang, "error_short"))
 
 
+def _format_estimated_time(question_count: int, open_period: int) -> str:
+    total_sec = max(0, int(question_count or 0) * max(0, int(open_period or 0)))
+    return f"{total_sec//60}m {total_sec%60}s" if total_sec >= 60 else f"{total_sec}s"
+
+
+def _format_previous_attempt(ui_lang: str, attempt: dict) -> str:
+    labels = _score_labels(ui_lang)
+    correct = int((attempt or {}).get("score") or 0)
+    answered = int((attempt or {}).get("answered") or 0)
+    total = int((attempt or {}).get("total_questions") or 0)
+    total_time_s = int((attempt or {}).get("total_time") or 0)
+    total_display = total if total > 0 else answered
+    return t(
+        ui_lang,
+        "previous_result",
+        correct=correct,
+        answered=answered,
+        total=total_display,
+        time=total_time_s,
+        correct_label=labels["correct"],
+        answered_label=labels["answered"],
+        total_time_label=labels["total_time"],
+    )
+
+
 def _is_rate_limit_error(exc: BaseException) -> bool:
+    """Detects transient AI-provider errors where the right action is to retry later.
+
+    Covers:
+      - 429 rate_limit (user/org quota exceeded for the minute)
+      - 529 overloaded_error (Anthropic/OpenAI server temporarily overloaded)
+      - 503 service unavailable (any provider — capacity issue)
+    All of these mean "wait and try again", so the user should see the same
+    friendly retry message, not a scary "unexpected error".
+    """
     msg = str(exc or "").lower()
     return (
         "rate_limit" in msg
@@ -276,6 +318,10 @@ def _is_rate_limit_error(exc: BaseException) -> bool:
         or "tokens per minute" in msg
         or "requests per minute" in msg
         or "output tokens per minute" in msg
+        or "529" in msg
+        or "overloaded" in msg
+        or "503" in msg
+        or "service unavailable" in msg
     )
 
 
@@ -1049,8 +1095,19 @@ def _score_labels(ui_lang: str) -> Dict[str, str]:
     return labels.get(lang, labels["en"])
 
 
-def _format_scoreboard(run: QuizRun, *, limit: int = 20) -> str:
-    total_questions = len(run.questions)
+def _run_result_total_questions(run: QuizRun, fallback_total: int = 0) -> int:
+    fallback = int(fallback_total or len(getattr(run, "questions", []) or []))
+    if not bool(getattr(run, "cancelled", False)):
+        return max(0, fallback)
+    answered_max = 0
+    for sc in (getattr(run, "scores", {}) or {}).values():
+        answered_max = max(answered_max, int(getattr(sc, "answered", 0) or 0))
+    shown = int(getattr(run, "current_index", 0) or 0)
+    return max(0, min(fallback, max(shown, answered_max)))
+
+
+def _format_scoreboard(run: QuizRun, *, limit: int = 20, total_questions: Optional[int] = None) -> str:
+    total_questions = int(total_questions if total_questions is not None else len(run.questions))
     ui_lang = norm_ui_lang(getattr(run, "ui_lang", "uz"))
     labels = _score_labels(ui_lang)
 
@@ -1077,6 +1134,13 @@ def _format_scoreboard(run: QuizRun, *, limit: int = 20) -> str:
     title = t(ui_lang, "scoreboard_title").rstrip(":").strip() or "Results"
     lines: List[str] = [f"🏆 <b>{html.escape(title)}</b>"]
 
+    quiz_title = str(getattr(run, "title", "") or "").strip()
+    quiz_id = int(getattr(run, "quiz_id", 0) or 0)
+    if quiz_title:
+        lines.append(f"📚 Test: <b>{html.escape(quiz_title)}</b>")
+    if quiz_id:
+        lines.append(f"🆔 ID: {quiz_id}")
+
     if run.chat_type in {"group", "supergroup"} and run.participants:
         lines.append("👥 " + html.escape(t(ui_lang, "participants_joined", n=len(run.participants))))
     lines.append("🧩 " + html.escape(t(ui_lang, "total_questions", n=total_questions)))
@@ -1091,7 +1155,8 @@ def _format_scoreboard(run: QuizRun, *, limit: int = 20) -> str:
 
         lines.append(f"{icon} {mention}")
 
-        lines.append(f"✅ {labels['correct']}: {int(r['correct'])}/{int(r['answered'])}")
+        denom = int(total_questions) if int(total_questions) > 0 else int(r["answered"])
+        lines.append(f"✅ {labels['correct']}: {int(r['correct'])}/{denom}")
         lines.append(f"⏱ {labels['total_time']}: {int(r['total_time'])}s")
         if int(r["answered"]):
             lines.append(f"⌛ {labels['avg']}: {avg_s}s")
@@ -1135,6 +1200,17 @@ def _telegram_share_url(url: str, text: str = "") -> str:
         t = quote_plus(str(text))
         return f"{base}?url={u}&text={t}"
     return f"{base}?url={u}"
+
+
+def _format_public_quiz_card(ui_lang: str, *, title: str, count: int, sec: int, quiz_id: int) -> str:
+    return t(
+        ui_lang,
+        "quiz_card",
+        title=str(title or f"Quiz {int(quiz_id)}"),
+        count=int(count or 0),
+        sec=int(sec or 30),
+        id=int(quiz_id),
+    )
 
 
 def _bot_private_link(bot_username: str) -> str:
@@ -1203,22 +1279,9 @@ def _kb_quiz_share(
 ) -> types.InlineKeyboardMarkup:
     ui_lang = norm_ui_lang(ui_lang)
     kb = InlineKeyboardBuilder()
-    start_link = _quiz_start_link(bot_username, quiz_id)
     startgroup_link = _quiz_startgroup_link(bot_username, quiz_id)
 
     kb.button(text=t(ui_lang, "btn_start_quiz"), callback_data=f"quiz_run:{quiz_id}")
-
-    if start_link:
-        share_text = t(
-            ui_lang,
-            "quiz_brief",
-            title=str(title or f"Quiz {int(quiz_id)}"),
-            count=int(question_count or 0),
-            id=int(quiz_id),
-        )
-        kb.button(text=t(ui_lang, "btn_share_quiz"), url=_telegram_share_url(start_link, share_text))
-    else:
-        kb.button(text=t(ui_lang, "btn_share_quiz"), callback_data=f"quiz_share:{quiz_id}")
 
     ct = (chat_type or "private").lower()
     if ct not in {"group", "supergroup"}:
@@ -1226,6 +1289,8 @@ def _kb_quiz_share(
             kb.button(text=t(ui_lang, "btn_start_group"), url=startgroup_link)
         else:
             kb.button(text=t(ui_lang, "btn_start_group"), callback_data=f"quiz_startgroup_fallback:{quiz_id}")
+
+    kb.button(text=t(ui_lang, "btn_share_quiz"), switch_inline_query=f"quiz_{int(quiz_id)}")
 
     if show_stats:
         kb.button(text=t(ui_lang, "btn_stats"), callback_data=f"quiz_stats:{quiz_id}")
@@ -1235,6 +1300,24 @@ def _kb_quiz_share(
         kb.button(text=t(ui_lang, "btn_export_docx"), callback_data=f"quiz_export:{quiz_id}")
 
     kb.adjust(2, 2, 2)
+    return kb.as_markup()
+
+
+def _kb_public_quiz_actions(bot_username: str, quiz_id: int, *, ui_lang: str = "uz") -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    start_link = _quiz_start_link(bot_username, quiz_id)
+    startgroup_link = _quiz_startgroup_link(bot_username, quiz_id)
+    if start_link:
+        kb.button(text=t(ui_lang, "btn_start_this_quiz"), url=start_link)
+    else:
+        kb.button(text=t(ui_lang, "btn_start_this_quiz"), callback_data=f"quiz_run:{quiz_id}")
+    if startgroup_link:
+        kb.button(text=t(ui_lang, "btn_start_group_quiz"), url=startgroup_link)
+    else:
+        kb.button(text=t(ui_lang, "btn_start_group_quiz"), callback_data=f"quiz_startgroup_fallback:{quiz_id}")
+    kb.button(text=t(ui_lang, "btn_share_quiz"), switch_inline_query=f"quiz_{int(quiz_id)}")
+    kb.adjust(1, 1, 1)
     return kb.as_markup()
 
 
@@ -1250,30 +1333,18 @@ def _kb_quiz_result_actions(
     """Actions shown under the final results message."""
     ui_lang = norm_ui_lang(ui_lang)
     kb = InlineKeyboardBuilder()
-    start_link = _quiz_start_link(bot_username, quiz_id)
     startgroup_link = _quiz_startgroup_link(bot_username, quiz_id)
 
     # Retry in the current chat
     kb.button(text=t(ui_lang, "btn_retry_quiz"), callback_data=f"quiz_run:{quiz_id}")
-
-    # Share deep link
-    if start_link:
-        share_text = t(
-            ui_lang,
-            "quiz_brief",
-            title=str(title or f"Quiz {int(quiz_id)}"),
-            count=int(question_count or 0),
-            id=int(quiz_id),
-        )
-        kb.button(text=t(ui_lang, "btn_share_quiz"), url=_telegram_share_url(start_link, share_text))
-    else:
-        kb.button(text=t(ui_lang, "btn_share_quiz"), callback_data=f"quiz_share:{quiz_id}")
 
     # Start in group (link or fallback)
     if startgroup_link:
         kb.button(text=t(ui_lang, "btn_start_group"), url=startgroup_link)
     else:
         kb.button(text=t(ui_lang, "btn_start_group"), callback_data=f"quiz_startgroup_fallback:{quiz_id}")
+
+    kb.button(text=t(ui_lang, "btn_share_quiz"), switch_inline_query=f"quiz_{int(quiz_id)}")
 
     kb.adjust(2)
     return kb.as_markup()
@@ -1299,7 +1370,7 @@ async def _start_saved_quiz(
         return
 
     # Cancel user's previous runs in this chat to avoid confusion.
-    await _cancel_user_runs(bot, chat_id=chat_id, user_id=user.id)
+    await _cancel_user_runs(bot, chat_id=chat_id, user_id=user.id, show_results=False)
     # Only one active test per chat to avoid chaos in groups.
     # A run in the lobby state (started=False, waiting for Join/Start) does NOT
     # count as active — only runs that have actually begun sending questions do.
@@ -1345,24 +1416,28 @@ async def _start_saved_quiz(
     run.scores[user.id].username = (getattr(user, "username", "") or run.scores[user.id].username)
     _ACTIVE_RUNS[run_id] = run
 
-    total_sec = max(0, len(questions) * max(0, run.open_period))
-    est = f"{total_sec//60}m {total_sec%60}s" if total_sec >= 60 else f"{total_sec}s"
+    est = _format_estimated_time(len(questions), run.open_period)
 
     if ct in {"group", "supergroup"}:
         m = await bot.send_message(chat_id, _format_lobby(run), reply_markup=_kb_lobby(run_id, ui_lang=ui_lang))
         run.lobby_message_id = m.message_id
         return
 
+    start_text = t(
+        ui_lang,
+        "quiz_started_private",
+        count=len(questions),
+        sec=int(run.open_period),
+        est=est,
+        quiz_id=int(quiz_id),
+    )
+    previous = await get_user_latest_quiz_attempt(int(quiz_id), int(user.id))
+    if previous:
+        start_text = _format_previous_attempt(ui_lang, previous) + "\n\n" + start_text
+
     await bot.send_message(
         chat_id,
-        t(
-            ui_lang,
-            "quiz_started_private",
-            count=len(questions),
-            sec=int(run.open_period),
-            est=est,
-            quiz_id=int(quiz_id),
-        ),
+        start_text,
         reply_markup=_kb_run_controls(run_id, ui_lang=ui_lang),
     )
     run.task = asyncio.create_task(_run_quiz(bot, run))
@@ -1531,6 +1606,8 @@ async def _run_quiz(bot: Bot, run: QuizRun) -> None:
                         await bot.send_message(run.chat_id, t(run.ui_lang, "quiz_stopped_no_participants"))
                         break
 
+        result_total = _run_result_total_questions(run, total)
+
         # Persist best-effort attempt stats for this quiz (creator can view per-quiz statistics).
         any_answered = any(int(getattr(sc, "answered", 0) or 0) > 0 for sc in (run.scores or {}).values())
         if run.quiz_id and run.scores and any_answered:
@@ -1552,7 +1629,7 @@ async def _run_quiz(bot: Bot, run: QuizRun) -> None:
                     payload,
                     chat_id=int(run.chat_id),
                     chat_type=str(run.chat_type or ""),
-                    total_questions=int(total),
+                    total_questions=int(result_total),
                     open_period=int(run.open_period or 0),
                     finished=not bool(run.cancelled),
                 )
@@ -1576,12 +1653,12 @@ async def _run_quiz(bot: Bot, run: QuizRun) -> None:
                     username,
                     int(run.quiz_id),
                     title=str(run.title or ""),
-                    question_count=len(run.questions),
+                    question_count=int(result_total),
                     chat_type=str(run.chat_type or ""),
                     ui_lang=run.ui_lang,
                 )
 
-            score_text = _format_scoreboard(run)
+            score_text = _format_scoreboard(run, total_questions=result_total)
             try:
                 await bot.send_message(
                     run.chat_id,
@@ -1754,6 +1831,17 @@ async def _is_user_subscribed_required_channel(bot: Bot, user_id: int, *, respec
         return False
 
 
+async def _is_group_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+    if not chat_id or not user_id:
+        return False
+    try:
+        member = await bot.get_chat_member(chat_id=int(chat_id), user_id=int(user_id))
+        status = str(getattr(member, "status", "") or "").lower()
+        return status in {"creator", "administrator"}
+    except Exception:
+        return False
+
+
 def _has_foreign_active_run(chat_id: int, user_id: int) -> bool:
     for run in list(_ACTIVE_RUNS.values()):
         if int(run.chat_id) != int(chat_id):
@@ -1822,7 +1910,15 @@ async def _ensure_subscribed(event: object, bot: Bot, user_id: int, *, pending_a
 
     return False
 
-async def _cancel_user_runs(bot: Bot, chat_id: int, user_id: int) -> int:
+def _strip_quiz_ready_header(text: str) -> str:
+    raw = str(text or "")
+    if "\n\n" in raw:
+        return raw.split("\n\n", 1)[1].lstrip()
+    lines = raw.splitlines()
+    return "\n".join(lines[1:]).lstrip() if len(lines) > 1 else raw
+
+
+async def _cancel_user_runs(bot: Bot, chat_id: int, user_id: int, *, show_results: bool = True) -> int:
     cancelled = 0
     for run in list(_ACTIVE_RUNS.values()):
         if run.chat_id != chat_id or run.created_by != user_id:
@@ -1834,9 +1930,33 @@ async def _cancel_user_runs(bot: Bot, chat_id: int, user_id: int) -> int:
                 await bot.stop_poll(run.chat_id, run.current_poll_message_id)
             except Exception:
                 pass
-        if run.task and not run.task.done():
-            run.task.cancel()
-        _ACTIVE_RUNS.pop(run.run_id, None)
+        if show_results and run.task and not run.task.done():
+            run.advance_event.set()
+        else:
+            if run.task and not run.task.done():
+                run.task.cancel()
+            _ACTIVE_RUNS.pop(run.run_id, None)
+    return cancelled
+
+
+async def _cancel_chat_runs(bot: Bot, chat_id: int, *, show_results: bool = True) -> int:
+    cancelled = 0
+    for run in list(_ACTIVE_RUNS.values()):
+        if int(run.chat_id) != int(chat_id):
+            continue
+        run.cancelled = True
+        cancelled += 1
+        if run.current_poll_message_id:
+            try:
+                await bot.stop_poll(run.chat_id, run.current_poll_message_id)
+            except Exception:
+                pass
+        if show_results and run.task and not run.task.done():
+            run.advance_event.set()
+        else:
+            if run.task and not run.task.done():
+                run.task.cancel()
+            _ACTIVE_RUNS.pop(run.run_id, None)
     return cancelled
 
 
@@ -1873,6 +1993,11 @@ async def cmd_start_deeplink(
                 pass
         payload = ''
 
+    user_id = message.from_user.id if message.from_user else 0
+    settings = await get_or_create_user_settings(user_id=user_id) if user_id else {"ui_lang": "uz", "ui_lang_picked": True}
+    ui_lang = norm_ui_lang(str(settings.get("ui_lang") or "uz"))
+    _set_ui_lang_cache(int(user_id or 0), ui_lang)
+
     if str(message.chat.type or "").lower() in {"group", "supergroup"} and not payload.startswith("quiz_"):
         await _send_private_only_notice(message, bot, ui_lang=ui_lang)
         return
@@ -1882,13 +2007,11 @@ async def cmd_start_deeplink(
         try:
             quiz_id = int(re.search(r"\d+", raw_id).group(0))  # type: ignore[union-attr]
         except Exception:
-            ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
             await message.answer(t(ui_lang, "bad_link"))
             return
 
         summary = await get_quiz_summary(quiz_id)
         if not summary:
-            ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
             await message.answer(t(ui_lang, "quiz_not_found"))
             return
 
@@ -1896,7 +2019,6 @@ async def cmd_start_deeplink(
         title = str(summary.get("title") or "")
         count = int(summary.get("question_count") or 0)
         open_period = int(summary.get("open_period") or 30)
-        ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
         await message.answer(
             t(ui_lang, "quiz_card", title=title, count=count, sec=open_period, id=quiz_id),
             reply_markup=_kb_quiz_share(
@@ -1910,19 +2032,10 @@ async def cmd_start_deeplink(
         )
         return
 
-    user_id = message.from_user.id if message.from_user else 0
-    settings = await get_or_create_user_settings(user_id=user_id) if user_id else {"ui_lang": "uz", "ui_lang_picked": True}
-    ui_lang = norm_ui_lang(str(settings.get("ui_lang") or "uz"))
-    _set_ui_lang_cache(int(user_id or 0), ui_lang)
-
-    if str(message.chat.type or "").lower() in {"group", "supergroup"}:
-        await _send_private_only_notice(message, bot, ui_lang=ui_lang)
-        return
-
     await _qualify_referral_and_notify(bot, user_id=user_id)
     await message.answer(
-        get_about_text(ui_lang),
-        reply_markup=_kb_main_menu(ui_lang, user_id=user_id, show_start_lang=True),
+        _START_LANG_PROMPT,
+        reply_markup=_kb_ui_language_settings(ui_lang, callback_prefix="start_set_ui_lang"),
     )
 
 
@@ -1946,8 +2059,8 @@ async def cmd_start(message: types.Message, state: FSMContext, bot: Bot) -> None
 
     await _qualify_referral_and_notify(bot, user_id=user_id)
     await message.answer(
-        get_about_text(ui_lang),
-        reply_markup=_kb_main_menu(ui_lang, user_id=user_id, show_start_lang=True),
+        _START_LANG_PROMPT,
+        reply_markup=_kb_ui_language_settings(ui_lang, callback_prefix="start_set_ui_lang"),
     )
 
 
@@ -2017,7 +2130,6 @@ async def cmd_topic(message: types.Message, state: FSMContext, bot: Bot) -> None
 async def quiz_share_fallback(call: types.CallbackQuery, bot: Bot) -> None:
     if not await _ensure_subscribed(call, bot, call.from_user.id if call.from_user else 0):
         return
-    # Fallback if URL buttons can't be built (no username).
     ui_lang = await _get_ui_lang(call.from_user.id)
     try:
         quiz_id = int(call.data.split(":", 1)[1])
@@ -2025,15 +2137,49 @@ async def quiz_share_fallback(call: types.CallbackQuery, bot: Bot) -> None:
         await call.answer(t(ui_lang, "error_short"), show_alert=True)
         return
 
-    username = await _get_bot_username(bot)
-    link = _quiz_start_link(username, quiz_id)
-    if not link:
-        await call.answer(t(ui_lang, "bot_username_missing"), show_alert=True)
+    summary = await get_quiz_summary(int(quiz_id))
+    if not summary:
+        await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
         return
 
-    await call.answer()
+    username = await _get_bot_username(bot)
     if call.message:
-        await call.message.answer(t(ui_lang, "share_link", link=link))
+        with suppress(Exception):
+            await call.message.edit_reply_markup(
+                reply_markup=_kb_public_quiz_actions(username, int(quiz_id), ui_lang=ui_lang)
+            )
+    await call.answer(t(ui_lang, "share_inline_hint"), show_alert=True)
+
+
+@router.inline_query()
+async def inline_share_quiz(query: types.InlineQuery, bot: Bot) -> None:
+    raw = str(query.query or "").strip().lower()
+    m = re.search(r"(?:^|\b)quiz[_:\-\s]+(\d+)(?:\b|$)", raw)
+    if not m:
+        await query.answer([], cache_time=1, is_personal=True)
+        return
+
+    quiz_id = int(m.group(1))
+    summary = await get_quiz_summary(int(quiz_id))
+    if not summary:
+        await query.answer([], cache_time=1, is_personal=True)
+        return
+
+    ui_lang = await _get_ui_lang(query.from_user.id if query.from_user else 0)
+    username = await _get_bot_username(bot)
+    title = str(summary.get("title") or f"Quiz {int(quiz_id)}")
+    count = int(summary.get("question_count") or 0)
+    sec = int(summary.get("open_period") or 30)
+    card_text = _format_public_quiz_card(ui_lang, title=title, count=count, sec=sec, quiz_id=int(quiz_id))
+
+    result = types.InlineQueryResultArticle(
+        id=f"quiz_{int(quiz_id)}",
+        title=t(ui_lang, "inline_share_title", title=title),
+        description=t(ui_lang, "inline_share_description", count=count, sec=sec, id=int(quiz_id)),
+        input_message_content=types.InputTextMessageContent(message_text=card_text),
+        reply_markup=_kb_public_quiz_actions(username, int(quiz_id), ui_lang=ui_lang),
+    )
+    await query.answer([result], cache_time=1, is_personal=True)
 
 
 
@@ -2115,7 +2261,12 @@ async def quiz_run_here(call: types.CallbackQuery, bot: Bot) -> None:
         return
 
     if not call.message:
-        await call.answer(t(ui_lang, "chat_not_found"), show_alert=True)
+        username = await _get_bot_username(bot)
+        link = _quiz_start_link(username, quiz_id)
+        if link:
+            await call.answer(t(ui_lang, "open_bot_to_start"), url=link)
+        else:
+            await call.answer(t(ui_lang, "chat_not_found"), show_alert=True)
         return
 
     await call.answer(t(ui_lang, "starting"))
@@ -2762,11 +2913,11 @@ def _kb_ai_language_settings(ui_lang: str) -> types.InlineKeyboardMarkup:
     return kb.as_markup()
 
 
-def _kb_ui_language_settings(ui_lang: str) -> types.InlineKeyboardMarkup:
+def _kb_ui_language_settings(ui_lang: str, *, callback_prefix: str = "set_ui_lang") -> types.InlineKeyboardMarkup:
     ui_lang = norm_ui_lang(ui_lang)
     kb = InlineKeyboardBuilder()
     for code in ("uz", "ru", "en", "de", "tr", "kk", "ar", "zh", "ko"):
-        kb.button(text=_lang_label_with_flag(code), callback_data=f"set_ui_lang:{code}")
+        kb.button(text=_lang_label_with_flag(code), callback_data=f"{callback_prefix}:{code}")
     kb.adjust(3, 3, 3)
     return kb.as_markup()
 
@@ -2779,7 +2930,7 @@ async def cmd_ui_language(message: types.Message, bot: Bot) -> None:
     if str(message.chat.type or "").lower() in {"group", "supergroup"}:
         await _send_private_only_notice(message, bot, ui_lang=ui_lang)
         return
-    await message.answer(t(ui_lang, "ui_lang_choose"), reply_markup=_kb_ui_language_settings(ui_lang))
+    await message.answer(_START_LANG_PROMPT, reply_markup=_kb_ui_language_settings(ui_lang))
 
 
 @router.callback_query(F.data == "menu_ui_language")
@@ -2790,7 +2941,7 @@ async def menu_ui_language(call: types.CallbackQuery, bot: Bot) -> None:
         await _send_private_only_notice(call, bot, ui_lang=ui_lang)
         return
     if call.message:
-        await call.message.answer(t(ui_lang, "ui_lang_choose"), reply_markup=_kb_ui_language_settings(ui_lang))
+        await call.message.answer(_START_LANG_PROMPT, reply_markup=_kb_ui_language_settings(ui_lang))
 
 
 @router.message(Command("language"))
@@ -2842,6 +2993,23 @@ async def set_ui_lang(call: types.CallbackQuery) -> None:
                 t(ui_lang, "ui_lang_saved", lang_name=lang_name(ui_lang)),
                 reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0),
             )
+
+
+@router.callback_query(F.data.startswith("start_set_ui_lang:"))
+async def start_set_ui_lang(call: types.CallbackQuery) -> None:
+    ui_lang = call.data.split(":", 1)[1].strip().lower()
+    if ui_lang not in {"uz", "ru", "en", "de", "tr", "kk", "ar", "zh", "ko"}:
+        await call.answer(t("uz", "invalid_button"), show_alert=True)
+        return
+
+    await set_user_ui_lang(call.from_user.id, ui_lang)
+    _set_ui_lang_cache(call.from_user.id, ui_lang)
+    await call.answer(t(ui_lang, "saved_short"))
+    if call.message:
+        await call.message.answer(
+            get_about_text(ui_lang),
+            reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0),
+        )
 
 
 @router.callback_query(F.data.startswith("set_lang:"))
@@ -3827,62 +3995,48 @@ async def admin_broadcast_message(message: types.Message, state: FSMContext, bot
     await status.edit_text(t(ui_lang, 'admin_broadcast_done', sent=sent, failed=failed, total=len(targets)))
     await message.answer(t(ui_lang, 'admin_broadcast_panel'), reply_markup=_kb_admin_panel(ui_lang))
 
-@router.callback_query(F.data == "menu_myquizzes")
-async def menu_myquizzes(call: types.CallbackQuery, bot: Bot) -> None:
-    await call.answer()
-    ui_lang = await _get_ui_lang(call.from_user.id)
-    quizzes = await list_user_quizzes(call.from_user.id, limit=20)
+def _kb_mytests_more(ui_lang: str, *, before_id: int) -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(ui_lang, "btn_more_quizzes"), callback_data=f"mytests_more_after:{max(0, int(before_id or 0))}")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+async def _send_mytests_page(
+    message: types.Message,
+    bot: Bot,
+    *,
+    user_id: int,
+    ui_lang: str,
+    offset: int = 0,
+    before_id: int = 0,
+) -> None:
+    offset = max(0, int(offset or 0))
+    before_id = max(0, int(before_id or 0))
+    quizzes = await list_user_quizzes(user_id, limit=_MYTESTS_PAGE_SIZE + 1, offset=offset, before_id=before_id)
     if not quizzes:
-        if call.message:
-            await call.message.answer(t(ui_lang, "no_quizzes_yet"))
-        return
-    if not call.message:
+        if offset <= 0:
+            await message.answer(t(ui_lang, "no_quizzes_yet"))
         return
 
     username = await _get_bot_username(bot)
-    shown = quizzes[:10]
+    shown = quizzes[:_MYTESTS_PAGE_SIZE]
     for q in shown:
         qid = int(q["id"])
         title = str(q["title"] or "")
         count = int(q["question_count"] or 0)
-        text = t(ui_lang, "quiz_brief", title=title, count=count, id=qid)
-        await call.message.answer(
-            text,
-            reply_markup=_kb_quiz_share(
-                username,
-                qid,
-                title=title,
-                question_count=count,
-                chat_type=call.message.chat.type,
-                ui_lang=ui_lang,
-                show_stats=True,
-                show_edit=True,
-            ),
-        )
-
-    if len(quizzes) > len(shown):
-        await call.message.answer(t(ui_lang, "more_quizzes", n=(len(quizzes) - len(shown))))
-
-
-@router.message(Command("mytests"))
-async def cmd_mytests(message: types.Message, bot: Bot) -> None:
-    if not message.from_user:
-        return
-    ui_lang = await _get_ui_lang(message.from_user.id)
-    if str(message.chat.type or "").lower() in {"group", "supergroup"}:
-        await _send_private_only_notice(message, bot, ui_lang=ui_lang)
-        return
-    quizzes = await list_user_quizzes(message.from_user.id, limit=20)
-    if not quizzes:
-        await message.answer(t(ui_lang, "no_quizzes_yet"))
-        return
-    username = await _get_bot_username(bot)
-    shown = quizzes[:10]
-    for q in shown:
-        qid = int(q["id"])
-        title = str(q["title"] or "")
-        count = int(q["question_count"] or 0)
-        text = t(ui_lang, "quiz_brief", title=title, count=count, id=qid)
+        sec = int(q.get("open_period") or 30)
+        text = _strip_quiz_ready_header(t(
+            ui_lang,
+            "ai_quiz_ready",
+            title=title,
+            topic_line="",
+            count=count,
+            sec=sec,
+            est=_format_estimated_time(count, sec),
+            id=qid,
+        ))
         await message.answer(
             text,
             reply_markup=_kb_quiz_share(
@@ -3898,7 +4052,57 @@ async def cmd_mytests(message: types.Message, bot: Bot) -> None:
         )
 
     if len(quizzes) > len(shown):
-        await message.answer(t(ui_lang, "more_quizzes", n=(len(quizzes) - len(shown))))
+        next_before_id = int(shown[-1]["id"]) if shown else 0
+        await message.answer(
+            t(ui_lang, "more_quizzes_available"),
+            reply_markup=_kb_mytests_more(ui_lang, before_id=next_before_id),
+        )
+
+
+@router.callback_query(F.data == "menu_myquizzes")
+async def menu_myquizzes(call: types.CallbackQuery, bot: Bot) -> None:
+    await call.answer()
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    if not call.message:
+        return
+    await _send_mytests_page(call.message, bot, user_id=call.from_user.id, ui_lang=ui_lang)
+
+
+@router.message(Command("mytests"))
+async def cmd_mytests(message: types.Message, bot: Bot) -> None:
+    if not message.from_user:
+        return
+    ui_lang = await _get_ui_lang(message.from_user.id)
+    if str(message.chat.type or "").lower() in {"group", "supergroup"}:
+        await _send_private_only_notice(message, bot, ui_lang=ui_lang)
+        return
+    await _send_mytests_page(message, bot, user_id=message.from_user.id, ui_lang=ui_lang)
+
+@router.callback_query(F.data.startswith("mytests_more:"))
+@router.callback_query(F.data.startswith("mytests_more_after:"))
+async def mytests_more(call: types.CallbackQuery, bot: Bot) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    if not call.message:
+        await call.answer()
+        return
+    if str(call.message.chat.type or "").lower() in {"group", "supergroup"}:
+        await call.answer()
+        await _send_private_only_notice(call, bot, ui_lang=ui_lang)
+        return
+    offset = 0
+    before_id = 0
+    try:
+        value = int(call.data.split(":", 1)[1])
+        if str(call.data or "").startswith("mytests_more_after:"):
+            before_id = value
+        else:
+            offset = value
+    except Exception:
+        pass
+    with suppress(Exception):
+        await call.message.edit_reply_markup(reply_markup=None)
+    await call.answer()
+    await _send_mytests_page(call.message, bot, user_id=call.from_user.id, ui_lang=ui_lang, offset=offset, before_id=before_id)
 
 
 @router.callback_query(F.data == "menu_cancel")
@@ -4603,6 +4807,13 @@ async def cmd_cancel(message: types.Message, state: FSMContext, bot: Bot) -> Non
     user_id = message.from_user.id if message.from_user else 0
     cancelled = await _cancel_user_runs(bot, chat_id=message.chat.id, user_id=user_id)
     if cancelled == 0 and _has_foreign_active_run(message.chat.id, user_id):
+        if str(message.chat.type or "").lower() in {"group", "supergroup"} and await _is_group_admin(bot, message.chat.id, user_id):
+            cancelled = await _cancel_chat_runs(bot, chat_id=message.chat.id)
+        if cancelled:
+            await state.clear()
+            ui_lang = await _get_ui_lang(user_id)
+            await message.answer(t(ui_lang, "stopped_n", n=cancelled))
+            return
         ui_lang = await _get_ui_lang(user_id)
         await message.answer(t(ui_lang, "group_stop_owner_only"))
         return
@@ -4944,7 +5155,11 @@ async def run_cancel(call: types.CallbackQuery, bot: Bot) -> None:
         ui_lang = await _get_ui_lang(call.from_user.id)
         await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
         return
-    if call.from_user.id != run.created_by:
+    is_owner = int(call.from_user.id) == int(run.created_by)
+    is_group_admin = False
+    if not is_owner and str(getattr(call.message.chat, "type", "") if call.message else run.chat_type).lower() in {"group", "supergroup"}:
+        is_group_admin = await _is_group_admin(bot, int(run.chat_id), int(call.from_user.id))
+    if not is_owner and not is_group_admin:
         await call.answer(t(run.ui_lang, "group_stop_owner_only"), show_alert=True)
         return
 
@@ -4956,8 +5171,9 @@ async def run_cancel(call: types.CallbackQuery, bot: Bot) -> None:
         except Exception:
             pass
     if run.task and not run.task.done():
-        run.task.cancel()
-    _ACTIVE_RUNS.pop(run_id, None)
+        run.advance_event.set()
+    else:
+        _ACTIVE_RUNS.pop(run_id, None)
 
     if call.message:
         try:

@@ -1174,6 +1174,38 @@ async def update_question_correct_answer(*, quiz_id: int, question_id: int, corr
         return True
 
 
+async def update_question_text(*, quiz_id: int, question_id: int, text: str) -> bool:
+    quiz_id = int(quiz_id or 0)
+    question_id = int(question_id or 0)
+    text = str(text or "").strip()
+    if not quiz_id or not question_id or not text:
+        return False
+
+    async with async_session() as session:
+        q = await session.get(Question, question_id)
+        if q is None or int(q.quiz_id or 0) != quiz_id:
+            return False
+        q.text = text
+        await session.commit()
+        return True
+
+
+async def update_question_options(*, quiz_id: int, question_id: int, options: List[str]) -> bool:
+    quiz_id = int(quiz_id or 0)
+    question_id = int(question_id or 0)
+    clean_options = [str(o or "").strip() for o in (options or [])]
+    if not quiz_id or not question_id or len(clean_options) != 4 or any(not o for o in clean_options):
+        return False
+
+    async with async_session() as session:
+        q = await session.get(Question, question_id)
+        if q is None or int(q.quiz_id or 0) != quiz_id:
+            return False
+        q.options = json.dumps(clean_options, ensure_ascii=False)
+        await session.commit()
+        return True
+
+
 async def get_quiz_summary(quiz_id: int) -> Optional[dict]:
     async with async_session() as session:
         stmt = (

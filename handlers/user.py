@@ -55,7 +55,6 @@ from services.database import (
     refund_user_quota,
     get_referral_status,
     qualify_referral_if_any,
-    claim_channel_bonus,
     record_referral_invite,
     reserve_user_quota,
     set_premium_request_status,
@@ -64,6 +63,8 @@ from services.database import (
     upsert_manual_quiz_draft,
     update_quiz_meta,
     update_question_correct_answer,
+    update_question_options,
+    update_question_text,
 )
 
 router = Router()
@@ -72,6 +73,7 @@ ai_service = AIService()
 _DOWNLOAD_DIR = Path("downloads")
 _PAYLOAD_DIR = _DOWNLOAD_DIR / "payloads"
 _ALLOWED_SUFFIXES = {".pdf", ".docx", ".pptx", ".xlsx", ".txt", ".md", ".json", ".png", ".jpg", ".jpeg", ".webp"}
+_STRUCTURED_SUFFIXES = {".pdf", ".docx", ".txt"}
 # Invisible placeholder keeps the Telegram message bubble compact for menu-only messages.
 # --- Quotas / limits -------------------------------------------------
 _PAYMENT_CARD_NUMBER = str(os.getenv('PAYMENT_CARD_NUMBER', '') or '').strip()
@@ -494,6 +496,67 @@ def _safe_filename(name: str) -> str:
     name = Path(name).name
     name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
     return name or "file"
+
+
+def _parse_upload_caption_meta(caption: str, *, title_fallback: str) -> tuple[str, int]:
+    title = (title_fallback or "Quiz").strip()[:120] or "Quiz"
+    open_period = 30
+    raw = str(caption or "").strip()
+    if not raw:
+        return title, open_period
+
+    for line in raw.splitlines():
+        m = re.match(r"(?is)^\s*(?:title|nom)\s*:\s*(.+)$", line.strip())
+        if m and (m.group(1) or "").strip():
+            title = (m.group(1) or "").strip()[:120]
+            break
+
+    m = re.search(r"(?i)\b(?:time|sec|sek|sekund|soniya)\s*[:\-]\s*(\d{1,3})\b", raw)
+    if m and m.group(1).isdigit():
+        open_period = int(m.group(1))
+    else:
+        m = _TIME_HINT_RE.search(raw)
+        if m and m.group(1).isdigit():
+            open_period = int(m.group(1))
+    return title, max(5, min(600, int(open_period or 30)))
+
+
+def _kb_upload_mode(ui_lang: str) -> types.InlineKeyboardMarkup:
+    ui_lang = norm_ui_lang(ui_lang)
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(ui_lang, "btn_upload_structured"), callback_data="upload_mode:structured")
+    if AI_ENABLED:
+        kb.button(text=t(ui_lang, "btn_upload_ai"), callback_data="upload_mode:ai")
+    kb.button(text=t(ui_lang, "btn_cancel"), callback_data="upload_mode:cancel")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
+def _structured_sample_url() -> str:
+    raw = str(os.getenv("STRUCTURED_SAMPLE_FILE_URL") or os.getenv("SAMPLE_FILE_URL") or "").strip()
+    if not raw:
+        raw = str(REQUIRED_CHANNEL or "").strip()
+    if not raw:
+        return ""
+    low = raw.lower()
+    if low.startswith(("http://", "https://")):
+        return raw
+    if low.startswith(("t.me/", "telegram.me/")):
+        return f"https://{raw}"
+    if raw.startswith("@"):
+        return f"https://t.me/{raw[1:]}"
+    return ""
+
+
+def _kb_structured_sample(ui_lang: str) -> Optional[types.InlineKeyboardMarkup]:
+    url = _structured_sample_url()
+    if not url:
+        return None
+    kb = InlineKeyboardBuilder()
+    kb.button(text=t(ui_lang, "btn_view_sample_file"), url=url)
+    kb.adjust(1)
+    return kb.as_markup()
+
 
 async def _send_quiz_docx(
     bot: Bot,
@@ -1728,9 +1791,9 @@ async def _open_upload_flow(message: types.Message, state: FSMContext, *, ui_lan
     if int(user_id or 0):
         await _persist_manual_draft(state, user_id=int(user_id), chat_id=int(message.chat.id))
     await state.clear()
-    await state.set_state(UploadStates.await_file)
-    key = "upload_hint" if AI_ENABLED else "upload_hint_noai"
-    await message.answer(t(ui_lang, key))
+    await state.update_data(upload_ui_lang=ui_lang, upload_user_id=int(user_id or 0))
+    await state.set_state(UploadStates.choose_type)
+    await message.answer(t(ui_lang, "upload_mode_prompt"), reply_markup=_kb_upload_mode(ui_lang))
 
 
 async def _open_topic_flow(message: types.Message, state: FSMContext, *, user_id: int, ui_lang: str) -> None:
@@ -2346,6 +2409,8 @@ async def quiz_stats(call: types.CallbackQuery) -> None:
 class QuizEditStates(StatesGroup):
     title = State()
     open_period = State()
+    question_text = State()
+    answer_options = State()
 
 
 def _kb_quiz_edit_menu(quiz_id: int, *, ui_lang: str = "uz") -> types.InlineKeyboardMarkup:
@@ -2353,9 +2418,10 @@ def _kb_quiz_edit_menu(quiz_id: int, *, ui_lang: str = "uz") -> types.InlineKeyb
     kb = InlineKeyboardBuilder()
     kb.button(text=t(ui_lang, "btn_edit_title"), callback_data=f"quiz_edit_title:{int(quiz_id)}")
     kb.button(text=t(ui_lang, "btn_edit_time"), callback_data=f"quiz_edit_time:{int(quiz_id)}")
+    kb.button(text=t(ui_lang, "btn_edit_questions"), callback_data=f"quiz_edit_questions:{int(quiz_id)}")
     kb.button(text=t(ui_lang, "btn_edit_answers"), callback_data=f"quiz_edit_answers:{int(quiz_id)}")
     kb.button(text=t(ui_lang, "btn_back"), callback_data=f"quiz_edit_back:{int(quiz_id)}")
-    kb.adjust(2, 2)
+    kb.adjust(2, 2, 1)
     return kb.as_markup()
 
 
@@ -2365,6 +2431,8 @@ def _kb_quiz_edit_questions(
     questions: List[Dict[str, Any]],
     offset: int,
     ui_lang: str,
+    item_callback_prefix: str = "quiz_edit_answer_q",
+    page_callback_prefix: str = "quiz_edit_answers",
     page_size: int = 20,
 ) -> types.InlineKeyboardMarkup:
     ui_lang = norm_ui_lang(ui_lang)
@@ -2380,17 +2448,17 @@ def _kb_quiz_edit_questions(
         qid = int(q.get("question_id") or 0)
         if not qid:
             continue
-        kb.button(text=str(i), callback_data=f"quiz_edit_answer_q:{int(quiz_id)}:{qid}:{offset}")
+        kb.button(text=str(i), callback_data=f"{item_callback_prefix}:{int(quiz_id)}:{qid}:{offset}")
         num_count += 1
 
     nav_count = 0
     if offset > 0:
         prev_off = max(0, offset - page_size)
-        kb.button(text=t(ui_lang, "btn_prev_page"), callback_data=f"quiz_edit_answers:{int(quiz_id)}:{prev_off}")
+        kb.button(text=t(ui_lang, "btn_prev_page"), callback_data=f"{page_callback_prefix}:{int(quiz_id)}:{prev_off}")
         nav_count += 1
     if (offset + page_size) < total:
         next_off = offset + page_size
-        kb.button(text=t(ui_lang, "btn_next_page"), callback_data=f"quiz_edit_answers:{int(quiz_id)}:{next_off}")
+        kb.button(text=t(ui_lang, "btn_next_page"), callback_data=f"{page_callback_prefix}:{int(quiz_id)}:{next_off}")
         nav_count += 1
 
     kb.button(text=t(ui_lang, "btn_back"), callback_data=f"quiz_edit:{int(quiz_id)}")
@@ -2569,6 +2637,7 @@ async def quiz_edit_answers(call: types.CallbackQuery, bot: Bot, state: FSMConte
         await call.answer(t(ui_lang, "quiz_no_questions"), show_alert=True)
         return
 
+    await state.clear()
     await call.answer()
     if call.message:
         await call.message.answer(
@@ -2577,8 +2646,63 @@ async def quiz_edit_answers(call: types.CallbackQuery, bot: Bot, state: FSMConte
         )
 
 
-@router.callback_query(F.data.startswith("quiz_edit_answer_q:"))
-async def quiz_edit_answer_pick(call: types.CallbackQuery, bot: Bot) -> None:
+@router.callback_query(F.data.startswith("quiz_edit_questions:"))
+async def quiz_edit_questions(call: types.CallbackQuery, bot: Bot, state: FSMContext) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    parts = str(call.data or "").split(":")
+    if len(parts) < 2:
+        await call.answer(t(ui_lang, "error_short"), show_alert=True)
+        return
+
+    try:
+        quiz_id = int(parts[1])
+    except Exception:
+        await call.answer(t(ui_lang, "error_short"), show_alert=True)
+        return
+
+    offset = 0
+    if len(parts) >= 3:
+        try:
+            offset = int(parts[2])
+        except Exception:
+            offset = 0
+
+    summary = await get_quiz_summary(quiz_id)
+    if not summary:
+        await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
+        return
+    if int(summary.get("creator_id") or 0) != int(call.from_user.id):
+        await call.answer(t(ui_lang, "edit_creator_only"), show_alert=True)
+        return
+
+    quiz = await get_quiz_with_questions(quiz_id)
+    if not quiz:
+        await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
+        return
+
+    questions = quiz.get("questions") or []
+    if not isinstance(questions, list) or not questions:
+        await call.answer(t(ui_lang, "quiz_no_questions"), show_alert=True)
+        return
+
+    await state.clear()
+    await call.answer()
+    if call.message:
+        await call.message.answer(
+            t(ui_lang, "edit_questions_choose_question", count=len(questions)),
+            reply_markup=_kb_quiz_edit_questions(
+                quiz_id,
+                questions=questions,
+                offset=offset,
+                ui_lang=ui_lang,
+                item_callback_prefix="quiz_edit_question_q",
+                page_callback_prefix="quiz_edit_questions",
+            ),
+        )
+
+
+@router.callback_query(F.data.startswith("quiz_edit_question_q:"))
+async def quiz_edit_question_pick(call: types.CallbackQuery, bot: Bot, state: FSMContext) -> None:
     ui_lang = await _get_ui_lang(call.from_user.id)
     parts = str(call.data or "").split(":")
     if len(parts) < 4:
@@ -2606,41 +2730,73 @@ async def quiz_edit_answer_pick(call: types.CallbackQuery, bot: Bot) -> None:
         await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
         return
 
-    questions = quiz.get("questions") or []
-    if not isinstance(questions, list) or not questions:
-        await call.answer(t(ui_lang, "quiz_no_questions"), show_alert=True)
+    picked = _find_question_by_id(quiz.get("questions") or [], question_id)
+    if not picked:
+        await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
         return
 
-    picked: Optional[Dict[str, Any]] = None
-    for q in questions:
-        if int(q.get("question_id") or 0) == int(question_id):
-            picked = q
-            break
+    await state.clear()
+    await state.update_data(e_quiz_id=quiz_id, e_question_id=question_id, e_offset=offset, e_ui_lang=ui_lang)
+    await state.set_state(QuizEditStates.question_text)
+    await call.answer()
+    if call.message:
+        await call.message.answer(
+            t(
+                ui_lang,
+                "edit_question_prompt",
+                question=_format_edit_question_preview(picked, ui_lang=ui_lang, include_correct=False),
+            ),
+            reply_markup=_kb_quiz_edit_cancel(quiz_id, ui_lang=ui_lang),
+        )
+
+
+@router.callback_query(F.data.startswith("quiz_edit_answer_q:"))
+async def quiz_edit_answer_pick(call: types.CallbackQuery, bot: Bot, state: FSMContext) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    parts = str(call.data or "").split(":")
+    if len(parts) < 4:
+        await call.answer(t(ui_lang, "error_short"), show_alert=True)
+        return
+
+    try:
+        quiz_id = int(parts[1])
+        question_id = int(parts[2])
+        offset = int(parts[3])
+    except Exception:
+        await call.answer(t(ui_lang, "error_short"), show_alert=True)
+        return
+
+    summary = await get_quiz_summary(quiz_id)
+    if not summary:
+        await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
+        return
+    if int(summary.get("creator_id") or 0) != int(call.from_user.id):
+        await call.answer(t(ui_lang, "edit_creator_only"), show_alert=True)
+        return
+
+    quiz = await get_quiz_with_questions(quiz_id)
+    if not quiz:
+        await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
+        return
+
+    picked = _find_question_by_id(quiz.get("questions") or [], question_id)
 
     if not picked:
         await call.answer(t(ui_lang, "quiz_not_found"), show_alert=True)
         return
 
-    opts = picked.get("options") or []
-    if not isinstance(opts, list):
-        opts = []
-    opts = [str(o) for o in opts][:4]
-
-    lines: List[str] = []
-    qtext = str(picked.get("question") or "").strip()
-    if qtext:
-        lines.append(qtext)
-    if opts:
-        for i, o in enumerate(opts, start=1):
-            lines.append(f"{i}) {o}")
-    lines.append("")
-    lines.append(t(ui_lang, "edit_answers_choose_correct"))
-
+    await state.clear()
+    await state.update_data(e_quiz_id=quiz_id, e_question_id=question_id, e_offset=offset, e_ui_lang=ui_lang)
+    await state.set_state(QuizEditStates.answer_options)
     await call.answer()
     if call.message:
         await call.message.answer(
-            "\n".join(lines).strip(),
-            reply_markup=_kb_quiz_edit_correct_answer(quiz_id, question_id=question_id, offset=offset, ui_lang=ui_lang),
+            t(
+                ui_lang,
+                "edit_answers_prompt",
+                question=_format_edit_question_preview(picked, ui_lang=ui_lang, include_correct=True),
+            ),
+            reply_markup=_kb_quiz_edit_cancel(quiz_id, ui_lang=ui_lang),
         )
 
 
@@ -2676,40 +2832,117 @@ async def quiz_edit_answer_set(call: types.CallbackQuery, bot: Bot) -> None:
 
     await call.answer(t(ui_lang, "edit_answers_updated"), show_alert=False)
 
-    # Re-open the same question view for quick verification.
     quiz = await get_quiz_with_questions(quiz_id)
     if not quiz:
         return
     questions = quiz.get("questions") or []
     if not isinstance(questions, list) or not questions:
         return
-    picked: Optional[Dict[str, Any]] = None
-    for q in questions:
-        if int(q.get("question_id") or 0) == int(question_id):
-            picked = q
-            break
-    if not picked:
-        return
-
-    opts = picked.get("options") or []
-    if not isinstance(opts, list):
-        opts = []
-    opts = [str(o) for o in opts][:4]
-    lines: List[str] = []
-    qtext = str(picked.get("question") or "").strip()
-    if qtext:
-        lines.append(qtext)
-    if opts:
-        for i, o in enumerate(opts, start=1):
-            lines.append(f"{i}) {o}")
-    lines.append("")
-    lines.append(t(ui_lang, "edit_answers_choose_correct"))
 
     if call.message:
         await call.message.answer(
-            "\n".join(lines).strip(),
-            reply_markup=_kb_quiz_edit_correct_answer(quiz_id, question_id=question_id, offset=offset, ui_lang=ui_lang),
+            t(ui_lang, "edit_answers_updated"),
+            reply_markup=_kb_quiz_edit_questions(quiz_id, questions=questions, offset=offset, ui_lang=ui_lang),
         )
+
+
+@router.message(QuizEditStates.question_text)
+async def quiz_edit_question_apply(message: types.Message, state: FSMContext) -> None:
+    if not message.from_user:
+        return
+    data = await state.get_data()
+    ui_lang = norm_ui_lang(str(data.get("e_ui_lang") or "")) or await _get_ui_lang(message.from_user.id)
+    quiz_id = int(data.get("e_quiz_id") or 0)
+    question_id = int(data.get("e_question_id") or 0)
+    offset = int(data.get("e_offset") or 0)
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer(t(ui_lang, "edit_question_required"), reply_markup=_kb_quiz_edit_cancel(quiz_id, ui_lang=ui_lang))
+        return
+
+    summary = await get_quiz_summary(quiz_id)
+    if not summary:
+        await state.clear()
+        await message.answer(t(ui_lang, "quiz_not_found"))
+        return
+    if int(summary.get("creator_id") or 0) != int(message.from_user.id):
+        await state.clear()
+        await message.answer(t(ui_lang, "edit_creator_only"))
+        return
+
+    ok = await update_question_text(quiz_id=quiz_id, question_id=question_id, text=text)
+    if not ok:
+        await state.clear()
+        await message.answer(t(ui_lang, "error_short"))
+        return
+
+    await state.clear()
+    await message.answer(t(ui_lang, "edit_question_updated"))
+    quiz = await get_quiz_with_questions(quiz_id)
+    questions = (quiz or {}).get("questions") or []
+    if isinstance(questions, list) and questions:
+        await message.answer(
+            t(ui_lang, "edit_questions_choose_question", count=len(questions)),
+            reply_markup=_kb_quiz_edit_questions(
+                quiz_id,
+                questions=questions,
+                offset=offset,
+                ui_lang=ui_lang,
+                item_callback_prefix="quiz_edit_question_q",
+                page_callback_prefix="quiz_edit_questions",
+            ),
+        )
+
+
+@router.message(QuizEditStates.answer_options)
+async def quiz_edit_answer_options_apply(message: types.Message, state: FSMContext) -> None:
+    if not message.from_user:
+        return
+    data = await state.get_data()
+    ui_lang = norm_ui_lang(str(data.get("e_ui_lang") or "")) or await _get_ui_lang(message.from_user.id)
+    quiz_id = int(data.get("e_quiz_id") or 0)
+    question_id = int(data.get("e_question_id") or 0)
+    offset = int(data.get("e_offset") or 0)
+    raw = (message.text or "").strip()
+    options = [line.strip() for line in raw.splitlines() if line.strip()]
+    if len(options) != 4:
+        await message.answer(t(ui_lang, "edit_answers_need_4_lines"), reply_markup=_kb_quiz_edit_cancel(quiz_id, ui_lang=ui_lang))
+        return
+
+    summary = await get_quiz_summary(quiz_id)
+    if not summary:
+        await state.clear()
+        await message.answer(t(ui_lang, "quiz_not_found"))
+        return
+    if int(summary.get("creator_id") or 0) != int(message.from_user.id):
+        await state.clear()
+        await message.answer(t(ui_lang, "edit_creator_only"))
+        return
+
+    ok = await update_question_options(quiz_id=quiz_id, question_id=question_id, options=options)
+    if not ok:
+        await state.clear()
+        await message.answer(t(ui_lang, "error_short"))
+        return
+
+    await state.clear()
+    quiz = await get_quiz_with_questions(quiz_id)
+    picked = _find_question_by_id((quiz or {}).get("questions") or [], question_id)
+    if not picked:
+        await message.answer(t(ui_lang, "edit_answers_updated"))
+        return
+
+    await message.answer(t(ui_lang, "edit_answers_updated"))
+    await message.answer(
+        "\n".join(
+            [
+                _format_edit_question_preview(picked, ui_lang=ui_lang, include_correct=False),
+                "",
+                t(ui_lang, "edit_answers_choose_correct"),
+            ]
+        ).strip(),
+        reply_markup=_kb_quiz_edit_correct_answer(quiz_id, question_id=question_id, offset=offset, ui_lang=ui_lang),
+    )
 
 
 @router.callback_query(F.data.startswith("quiz_edit_title:"))
@@ -2922,6 +3155,33 @@ def _kb_ui_language_settings(ui_lang: str, *, callback_prefix: str = "set_ui_lan
     return kb.as_markup()
 
 
+def _format_edit_question_preview(question: Dict[str, Any], *, ui_lang: str, include_correct: bool = True) -> str:
+    opts = question.get("options") or []
+    if not isinstance(opts, list):
+        opts = []
+    opts = [str(o) for o in opts][:4]
+    correct_index = int(question.get("correct_index") or 0)
+
+    lines: List[str] = []
+    qtext = str(question.get("question") or "").strip()
+    if qtext:
+        lines.append(qtext)
+    else:
+        lines.append(t(ui_lang, "image_question"))
+    if opts:
+        for i, o in enumerate(opts, start=1):
+            marker = " *" if include_correct and (i - 1) == correct_index else ""
+            lines.append(f"{i}) {o}{marker}")
+    return "\n".join(lines).strip()
+
+
+def _find_question_by_id(questions: List[Dict[str, Any]], question_id: int) -> Optional[Dict[str, Any]]:
+    for q in questions or []:
+        if int(q.get("question_id") or 0) == int(question_id):
+            return q
+    return None
+
+
 
 @router.message(Command("til"))
 @router.message(Command("lang"))
@@ -3041,6 +3301,37 @@ async def menu_upload(call: types.CallbackQuery, state: FSMContext, bot: Bot) ->
         await _open_upload_flow(call.message, state, ui_lang=ui_lang, user_id=call.from_user.id)
 
 
+@router.callback_query(F.data.startswith("upload_mode:"))
+async def upload_mode_choose(call: types.CallbackQuery, state: FSMContext) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    st = await state.get_state()
+    if st != UploadStates.choose_type.state:
+        await call.answer(t(ui_lang, "session_missing"), show_alert=True)
+        return
+
+    mode = str(call.data or "").split(":", 1)[1].strip().lower()
+    if mode == "cancel":
+        await state.clear()
+        await call.answer()
+        if call.message:
+            await call.message.answer(t(ui_lang, "cancelled"))
+        return
+    if mode not in {"structured", "ai"}:
+        await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
+        return
+    if mode == "ai" and not AI_ENABLED:
+        await call.answer(t(ui_lang, "ai_disabled"), show_alert=True)
+        return
+
+    await state.update_data(upload_mode=mode, upload_ui_lang=ui_lang, upload_user_id=call.from_user.id)
+    await state.set_state(UploadStates.await_file)
+    await call.answer()
+    if call.message:
+        key = "upload_hint_structured" if mode == "structured" else "upload_hint"
+        reply_markup = _kb_structured_sample(ui_lang) if mode == "structured" else None
+        await call.message.answer(t(ui_lang, key), reply_markup=reply_markup)
+
+
 @router.callback_query(F.data == "menu_topic")
 async def menu_topic(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
     ui_lang = await _get_ui_lang(call.from_user.id)
@@ -3080,6 +3371,7 @@ class AdminBroadcastStates(StatesGroup):
 
 
 class UploadStates(StatesGroup):
+    choose_type = State()
     await_file = State()
 def _fmt_money_uzs(amount: int) -> str:
     try:
@@ -3172,7 +3464,6 @@ def _kb_bonus_menu(ui_lang: str) -> types.InlineKeyboardMarkup:
     ui_lang = norm_ui_lang(ui_lang)
     kb = InlineKeyboardBuilder()
     kb.button(text=t(ui_lang, 'btn_referral'), callback_data='prem_ref')
-    kb.button(text=t(ui_lang, 'btn_channel_bonus'), callback_data='prem_channel_bonus')
     kb.button(text=t(ui_lang, 'btn_back'), callback_data='bonus_back')
     kb.adjust(1)
     return kb.as_markup()
@@ -3237,54 +3528,11 @@ async def prem_ref(call: types.CallbackQuery, bot: Bot) -> None:
         await call.message.answer(msg, disable_web_page_preview=True)
 
 
-def _kb_channel_bonus(ui_lang: str) -> types.InlineKeyboardMarkup:
-    ui_lang = norm_ui_lang(ui_lang)
-    kb = InlineKeyboardBuilder()
-    url = _required_channel_url()
-    if url:
-        kb.button(text=t(ui_lang, 'btn_join_channel'), url=url)
-    kb.button(text=t(ui_lang, 'btn_check_sub'), callback_data='prem_channel_check')
-    kb.button(text=t(ui_lang, 'btn_back'), callback_data='bonus_back')
-    kb.adjust(1)
-    return kb.as_markup()
-
-
-async def _send_channel_bonus_result(call: types.CallbackQuery, bot: Bot) -> None:
-    ui_lang = await _get_ui_lang(call.from_user.id)
-    ch = str(REQUIRED_CHANNEL or '').strip()
-    if not ch:
-        await call.answer(t(ui_lang, 'channel_bonus_unavailable'), show_alert=True)
-        if call.message:
-            await call.message.answer(t(ui_lang, 'channel_bonus_unavailable'))
-        return
-    if not await _is_user_subscribed_required_channel(bot, call.from_user.id if call.from_user else 0, respect_gate=False):
-        await call.answer(t(ui_lang, 'channel_bonus_check_fail'), show_alert=True)
-        if call.message:
-            await call.message.answer(
-                t(ui_lang, 'channel_bonus_prompt', channel=ch),
-                reply_markup=_kb_channel_bonus(ui_lang),
-                disable_web_page_preview=True,
-            )
-        return
-    result = await claim_channel_bonus(call.from_user.id if call.from_user else 0, files=1, topics=1)
-    if not result.get('ok'):
-        await call.answer(t(ui_lang, 'channel_bonus_claimed'), show_alert=True)
-        if call.message:
-            await call.message.answer(t(ui_lang, 'channel_bonus_claimed'))
-        return
-    await call.answer(t(ui_lang, 'channel_bonus_granted'), show_alert=False)
-    if call.message:
-        await call.message.answer(t(ui_lang, 'channel_bonus_granted'))
-
-
 @router.callback_query(F.data == 'prem_channel_bonus')
-async def prem_channel_bonus(call: types.CallbackQuery, bot: Bot) -> None:
-    await _send_channel_bonus_result(call, bot)
-
-
 @router.callback_query(F.data == 'prem_channel_check')
-async def prem_channel_check(call: types.CallbackQuery, bot: Bot) -> None:
-    await _send_channel_bonus_result(call, bot)
+async def prem_channel_bonus_disabled(call: types.CallbackQuery) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    await call.answer(t(ui_lang, 'channel_bonus_disabled'), show_alert=True)
 
 
 @router.callback_query(F.data == 'prem_back')
@@ -5723,7 +5971,7 @@ def _apply_quiz_shuffle(items: List[Dict[str, Any]], *, shuffle_questions: bool,
 
 def _should_offer_ai_shuffle(data: Dict[str, Any]) -> bool:
     mode = str(data.get("ai_mode") or "").strip().lower()
-    return mode in {"file", "image"}
+    return mode in {"file", "image", "structured"}
 
 
 def _shuffle_mode_flags(mode: str) -> tuple[bool, bool]:
@@ -6322,6 +6570,12 @@ async def ai_choose_time(call: types.CallbackQuery, state: FSMContext) -> None:
     await state.update_data(ai_open_period=sec)
     mode = str(data.get("ai_mode") or "").strip().lower()
     import_only = bool(data.get("ai_import_only"))
+    if mode == "structured":
+        await state.update_data(ai_output_language="source")
+        await state.set_state(AIQuizStates.choose_shuffle)
+        if call.message:
+            await call.message.answer(t(ui_lang, "shuffle_prompt_ai"), reply_markup=_kb_ai_shuffle(session_id, ui_lang=ui_lang))
+        return
     if mode == "file":
         await state.set_state(AIQuizStates.choose_difficulty)
         if call.message:
@@ -6402,8 +6656,11 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
 
     mode = str(data.get('ai_mode') or '').strip().lower()
     quota_kind = 'topic' if mode == 'topic' else 'file'
+    structured_free = bool(data.get("ai_structured_free")) or mode == "structured"
     reservation: Optional[dict] = None
     should_offer_shuffle = mode in {"file", "image"}
+    if structured_free:
+        should_offer_shuffle = True
     shuffle_mode = str(data.get("ai_shuffle_mode") or "none").strip().lower() if should_offer_shuffle else "none"
     shuffle_strategy = _normalize_shuffle_strategy(data.get("ai_shuffle_strategy") or "saved") if should_offer_shuffle else "saved"
     generation_shuffle_options = not should_offer_shuffle
@@ -6429,21 +6686,23 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
         return
 
     # Check quota without consuming. Consume only after AI returns successfully.
-    try:
-        await check_user_quota(user.id, quota_kind)
-    except QuotaExceeded as exc:
-        await state.clear()
-        await bot.send_message(chat_id, _quota_exceeded_text(ui_lang, exc), reply_markup=_kb_premium_plans(ui_lang))
-        return
+    if not structured_free:
+        try:
+            await check_user_quota(user.id, quota_kind)
+        except QuotaExceeded as exc:
+            await state.clear()
+            await bot.send_message(chat_id, _quota_exceeded_text(ui_lang, exc), reply_markup=_kb_premium_plans(ui_lang))
+            return
 
-    msg = await bot.send_message(chat_id, t(ui_lang, "ai_working"))
+    work_text = t(ui_lang, "importing_quiz") if structured_free else t(ui_lang, "ai_working")
+    msg = await bot.send_message(chat_id, work_text)
     anim_stop = asyncio.Event()
     anim_task = asyncio.create_task(
         _animate_working_message(
             bot,
             chat_id=int(chat_id),
             message_id=int(getattr(msg, "message_id", 0) or 0),
-            base_text=t(ui_lang, "ai_working"),
+            base_text=work_text,
             stop=anim_stop,
         )
     )
@@ -6792,7 +7051,8 @@ async def _start_ai_quiz(bot: Bot, state: FSMContext, *, chat_id: int, user: typ
             except Exception:
                 pass
 
-        reservation = await reserve_user_quota(user.id, quota_kind)
+        if not structured_free:
+            reservation = await reserve_user_quota(user.id, quota_kind)
 
         await get_or_create_user(user_id=user.id, full_name=user.full_name, username=getattr(user, "username", None))
         quiz_id = await create_quiz(
@@ -7187,17 +7447,96 @@ async def ai_choose_shuffle_strategy(call: types.CallbackQuery, state: FSMContex
     )
 
 
+async def _import_structured_quiz_upload(
+    *,
+    state: FSMContext,
+    bot: Bot,
+    status: types.Message,
+    local_path: Path,
+    suffix: str,
+    file_name: str,
+    caption: str,
+    user: types.User,
+    chat_id: int,
+    chat_type: str,
+    ui_lang: str,
+) -> None:
+    title, open_period = _parse_upload_caption_meta(caption, title_fallback=Path(file_name).stem)
+    await status.edit_text(t(ui_lang, "importing_quiz"))
+
+    if suffix == ".txt":
+        raw = local_path.read_text(encoding="utf-8", errors="ignore")
+    elif suffix in {".pdf", ".docx"}:
+        await status.edit_text(t(ui_lang, "extracting_text"))
+        raw = await asyncio.to_thread(extract_text_from_file, str(local_path))
+    else:
+        await status.edit_text(t(ui_lang, "upload_hint_structured"), reply_markup=_kb_structured_sample(ui_lang))
+        return
+    parsed_title, questions = parse_quiz_payload(raw, title_fallback=title)
+
+    if parsed_title:
+        title = str(parsed_title).strip()[:120] or title
+    questions = _merge_unique_questions(list(questions or []))
+    if not questions:
+        await status.edit_text(f"{t(ui_lang, 'import_failed')}\n\n{import_format_example()}")
+        return
+
+    max_n = max(1, min(50, len(questions)))
+    session_id = uuid.uuid4().hex
+    payload_path = _save_temp_payload(
+        json.dumps({"title": title, "questions": questions}, ensure_ascii=False),
+        suffix=".json",
+    )
+    await state.update_data(
+        ai_session_id=session_id,
+        ai_mode="structured",
+        ai_difficulty="",
+        ai_ui_lang=ui_lang,
+        ai_text="",
+        ai_text_path=payload_path,
+        ai_title=title,
+        ai_open_period=open_period,
+        ai_chat_id=chat_id,
+        ai_chat_type=chat_type,
+        ai_user_id=user.id,
+        ai_max_questions=max_n,
+        ai_pages_total=1,
+        ai_import_only=True,
+        ai_structured_free=True,
+    )
+    await state.set_state(AIQuizStates.choose_count)
+    await status.edit_text(
+        t(ui_lang, "structured_file_parsed", n=len(questions)) + "\n" + t(ui_lang, "choose_count", max_n=max_n),
+        reply_markup=_kb_counts(
+            session_id,
+            max_n=max_n,
+            ui_lang=ui_lang,
+            show_pages=False,
+            show_topic_optional=False,
+        ),
+    )
+
+
 @router.message(F.photo)
 async def on_photo_upload(message: types.Message, bot: Bot, state: FSMContext) -> None:
     if not await _ensure_subscribed(message, bot, message.from_user.id if message.from_user else 0):
         return
     # Only handle photo uploads when user is not inside another FSM flow (manual/AI/etc).
     st = await state.get_state()
+    if st == UploadStates.choose_type.state:
+        ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
+        await message.answer(t(ui_lang, "upload_mode_prompt"), reply_markup=_kb_upload_mode(ui_lang))
+        return
     if st != UploadStates.await_file.state:
         return
 
     user_id = message.from_user.id if message.from_user else 0
     ui_lang = await _get_ui_lang(user_id)
+    data = await state.get_data()
+    upload_mode = str(data.get("upload_mode") or ("ai" if AI_ENABLED else "structured")).strip().lower()
+    if upload_mode == "structured":
+        await message.answer(t(ui_lang, "upload_hint_structured"), reply_markup=_kb_structured_sample(ui_lang))
+        return
 
     if not AI_ENABLED:
         await message.answer(t(ui_lang, "upload_hint_noai"))
@@ -7270,6 +7609,10 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
         return
     # Ignore documents while user is in another FSM flow (manual quiz, premium, etc).
     st = await state.get_state()
+    if st == UploadStates.choose_type.state:
+        ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
+        await message.answer(t(ui_lang, "upload_mode_prompt"), reply_markup=_kb_upload_mode(ui_lang))
+        return
     if st != UploadStates.await_file.state:
         return
 
@@ -7278,10 +7621,15 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
         return
 
     ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
+    data = await state.get_data()
+    upload_mode = str(data.get("upload_mode") or ("ai" if AI_ENABLED else "structured")).strip().lower()
     file_name = doc.file_name or "file"
     suffix = Path(file_name).suffix.lower()
     if suffix not in _ALLOWED_SUFFIXES:
         await message.answer(_file_type_only_message(ui_lang))
+        return
+    if upload_mode == "structured" and suffix not in _STRUCTURED_SUFFIXES:
+        await message.answer(t(ui_lang, "upload_hint_structured"), reply_markup=_kb_structured_sample(ui_lang))
         return
 
     max_mb = _max_upload_mb_for_suffix(suffix)
@@ -7302,6 +7650,25 @@ async def on_document(message: types.Message, bot: Bot, state: FSMContext) -> No
         await bot.download_file(tg_file.file_path, str(local_path))
 
         caption = (message.caption or "").strip()
+
+        if upload_mode == "structured":
+            if message.from_user is None:
+                await status.edit_text(t(ui_lang, "error_short"))
+                return
+            await _import_structured_quiz_upload(
+                state=state,
+                bot=bot,
+                status=status,
+                local_path=local_path,
+                suffix=suffix,
+                file_name=file_name,
+                caption=caption,
+                user=message.from_user,
+                chat_id=message.chat.id,
+                chat_type=message.chat.type,
+                ui_lang=ui_lang,
+            )
+            return
 
         # Image upload (.jpg/.png): handled via vision (OpenAI/Gemini).
         if suffix in {".png", ".jpg", ".jpeg", ".webp"}:

@@ -40,10 +40,16 @@
   const state = { lang: "uz", tab: "file", route: "file", profile: null, file: null, fileOptions: defaultOptions(), topicOptions: defaultOptions(), topic: "", manual: { title: "", questions: [blankQuestion()], ...defaultOptions() }, job: null, readyId: null, error: null, quiz: null, quizzes: [], next: null, busy: false, routeVersion: 0 };
   let userKey = "guest";
   let profileDraft = null;
+  let supportDraft = "";
+  let supportBusy = false;
+  let supportSent = false;
   let avatarUrl = "";
   let pendingAvatar = null;
   let avatarPreview = "";
   let removeAvatar = false;
+  const avatarCropper = new window.AvatarCropper();
+  let avatarLoading = false;
+  let avatarLoadTicket = 0;
   let pollTimer;
   let toastTimer;
   let imageUrls = [];
@@ -74,7 +80,7 @@
   }
 
   function openTelegram(url) {
-    if (!/^https:\/\/t\.me\/[A-Za-z0-9_]+(?:\?|$)/.test(url)) return;
+    if (!/^https:\/\/t\.me\/(?:share\/url|[A-Za-z0-9_]+)(?:\?|$)/.test(url)) return;
     if (tg && auth) tg.openTelegramLink(url);
     else window.open(url, "_blank", "noopener,noreferrer");
   }
@@ -97,7 +103,7 @@
     return `<div class="eyebrow">${icon("spark")}${tr("eyebrow")}</div><h1>${tr(`${type}Title`)}<br><span class="accent">${tr(`${type}Accent`)}</span></h1><p class="intro">${tr(`${type}Intro`)}</p>`;
   }
   const cardHead = (name, title, extra = "") => `<div class="card-head"><span class="small-icon">${icon(name)}</span><h2>${title}</h2>${extra}</div>`;
-  const primary = (label, name = "arrow") => `<button type="submit" class="primary" ${state.busy ? "disabled" : ""}>${icon(name)}${state.busy ? tr("loading") : label}</button>`;
+  const primary = (label, name = "arrow") => { const busy = state.busy || (state.route === "profile-edit" && avatarLoading); return `<button type="submit" class="primary" ${busy ? "disabled" : ""}>${icon(name)}${busy ? tr("loading") : label}</button>`; };
   const tip = message => `<aside class="tip">${icon("bulb")}<div><strong>${tr("tipTitle")}</strong><p>${message}</p></div></aside>`;
   const back = () => `<button class="back" data-go="profile">${icon("back")}${tr("back")}</button>`;
   const profileName = () => state.profile?.profile?.display_name || state.profile?.user?.first_name || tr("guest");
@@ -153,18 +159,27 @@
     const row = (name, label, route) => `<button class="row-button" data-go="${route}"><span class="small-icon">${icon(name)}</span><span>${label}</span>${icon("chevron")}</button>`;
     return `<h1>${tr("profileTitle")}</h1><p class="intro">${tr("profileIntro")}</p>${errorHtml()}<section class="card"><div class="profile-hero"><span class="avatar">${avatarContent()}</span><div><h2>${esc(name)}</h2><span class="muted">${q?.premium_active ? tr("premium") : tr("free")}${p?.profile?.username ? ` · @${esc(p.profile.username)}` : ""}</span></div></div><button class="secondary" data-go="profile-edit">${icon("edit")}${tr("editProfile")}</button>
       <div class="quota"><div><strong>${files}</strong><small>${tr("filesLeft")}</small></div><div><strong>${topics}</strong><small>${tr("topicsLeft")}</small></div></div>${until ? `<p class="muted" style="margin:12px 0 0">${tr("expires")}: ${esc(new Date(until).toLocaleDateString(state.lang))}</p>` : ""}</section>
-      <section class="card" style="padding-block:4px">${row("crown", tr("premium"), "premium")}${row("gift", tr("bonuses"), "bonuses")}${row("file", tr("myTests"), "quizzes")}</section>
+      <section class="card" style="padding-block:4px">${row("bulb", tr("support"), "support")}${row("crown", tr("premium"), "premium")}${row("gift", tr("bonuses"), "bonuses")}${row("file", tr("myTests"), "quizzes")}</section>
       <section class="card">${cardHead("globe", tr("uiLanguage"))}<label class="field"><span>${tr("uiLanguage")}</span><select id="ui-language">${["uz", "ru", "en"].map(l => `<option value="${l}"${selected(state.lang, l)}>${langs[l]()}</option>`).join("")}</select></label></section>
       ${auth && !p ? `<button class="secondary" data-refresh>${icon("arrow")}${tr("retry")}</button>` : ""}`;
+  }
+
+  function avatarCropHtml() {
+    const disabled = state.busy || avatarLoading ? "disabled" : "";
+    return `<div class="avatar-cropper"><h2>${tr("avatarCropTitle")}</h2><p class="muted">${tr("avatarCropHint")}</p>
+      <div class="avatar-crop-stage" tabindex="0" role="group" aria-label="${esc(tr("avatarCropHint"))}"><canvas width="768" height="768"></canvas></div>
+      <label class="avatar-zoom"><span>${tr("avatarZoom")}</span><input type="range" min="0.1" max="4" step="any" value="${avatarCropper.zoom}" aria-label="${esc(tr("avatarZoom"))}" ${disabled}><output></output></label>
+      <div class="avatar-crop-actions"><button type="button" class="secondary" data-avatar-fit ${disabled}>${tr("avatarFit")}</button><button type="button" class="secondary" data-avatar-reset ${disabled}>${tr("avatarReset")}</button></div>
+      <p class="muted">${tr("avatarCropSaveHint")}</p>${primary(tr("saveAvatar"), "check")}</div>`;
   }
 
   function profileEditPage() {
     if (!profileDraft) profileDraft = { display_name: profileName(), username: state.profile?.profile?.username || "" };
     return `${back()}<h1>${tr("editProfile")}</h1><p class="intro">${tr("profileNote")}</p><form id="profile-form">${errorHtml()}
-      <section class="card avatar-editor"><span class="avatar">${avatarContent(removeAvatar ? "" : (avatarPreview || avatarUrl))}</span>
+      <section class="card avatar-editor">${avatarCropper.active ? avatarCropHtml() : `<span class="avatar">${avatarContent(removeAvatar ? "" : (avatarPreview || avatarUrl))}</span>`}
       <input type="file" id="avatar-input" accept="image/png,image/jpeg,image/webp" hidden>
-      <button type="button" class="secondary" data-avatar-choose>${icon("upload")}${tr("chooseAvatar")}</button>
-      ${pendingAvatar || (state.profile?.profile?.has_avatar && !removeAvatar) ? `<button type="button" class="back" data-avatar-remove>${icon("trash")}${tr("removeAvatar")}</button>` : ""}<p class="muted">${tr("avatarHint")}</p></section>
+      <button type="button" class="secondary" data-avatar-choose ${state.busy ? "disabled" : ""}>${icon("upload")}${tr("chooseAvatar")}</button>
+      ${pendingAvatar || (state.profile?.profile?.has_avatar && !removeAvatar) ? `<button type="button" class="back" data-avatar-remove ${state.busy ? "disabled" : ""}>${icon("trash")}${tr("removeAvatar")}</button>` : ""}<p class="muted">${tr("avatarHint")}</p></section>
       <section class="card"><label class="field"><span>${tr("displayName")}</span><input name="display_name" type="text" autocomplete="name" required maxlength="80" value="${esc(profileDraft.display_name)}"></label>
       <label class="field"><span>${tr("username")}</span><input name="profile_username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="33" placeholder="username" value="${esc(profileDraft.username)}"><small>${tr("usernameHint")}</small></label></section>
       ${primary(tr("saveProfile"), "check")}<button type="button" class="secondary" data-go="profile">${tr("cancel")}</button></form>`;
@@ -182,6 +197,32 @@
     return `${back()}<h1>${tr("bonuses")}</h1><p class="intro">${tr("bonusIntro")}</p><section class="card">${cardHead("gift", tr("bonuses"))}
       <div class="quota"><div><strong>${r?.total ?? "—"}</strong><small>${tr("invited")}</small></div><div><strong>${r?.qualified ?? "—"}</strong><small>${tr("qualified")}</small></div></div><p class="muted" style="margin-top:13px">${tr("toNext")}: ${r?.to_next_reward ?? "—"}</p>
       <div class="ref-link">${esc(botLink(`ref_${state.profile?.user.id}`) || tr("openTelegram"))}</div><button class="primary" data-copy>${icon("copy")}${tr("copy")}</button><button class="secondary" data-share>${icon("share")}${tr("share")}</button></section>`;
+  }
+
+  function supportPage() {
+    return `${back()}<h1>${tr("support")}</h1><p class="intro">${tr("supportIntro")}</p><form id="support-form">${errorHtml()}
+      ${supportSent ? `<p class="result-count" role="status">${tr("supportSent")}</p>` : ""}
+      <section class="card"><label class="field"><span>${tr("supportMessage")}</span><textarea name="support_message" maxlength="3000" rows="6" required placeholder="${esc(tr("supportPlaceholder"))}" ${supportBusy ? "disabled" : ""}>${esc(supportDraft)}</textarea><small>${tr("supportHint")}</small></label>
+      <button type="submit" class="primary" ${supportBusy || !auth ? "disabled" : ""}>${icon("share")}${tr(supportBusy ? "loading" : "supportSend")}</button></section></form>`;
+  }
+
+  async function sendSupport() {
+    if (supportBusy) return;
+    if (!supportDraft.trim()) return toast(errorText("invalid_support_message"));
+    const version = state.routeVersion;
+    supportBusy = true; supportSent = false; state.error = null;
+    render();
+    try {
+      await api("support", { method: "POST", body: { message: supportDraft } });
+      supportDraft = ""; supportSent = true;
+      toast(tr("supportSent"));
+    } catch (error) {
+      if (state.routeVersion === version) state.error = error.code || "server_error";
+      toast(error.message);
+    } finally {
+      supportBusy = false;
+      if (state.route === "support") render();
+    }
   }
 
   function quizzesPage() {
@@ -214,11 +255,12 @@
     else if (state.job) banner.innerHTML = `<button class="back" style="margin:0" data-go="working">${tr("working")} ${icon("chevron")}</button>`;
     else if (state.readyId) banner.innerHTML = `<button class="back" style="margin:0" data-quiz="${state.readyId}">${tr("ready")} ${icon("chevron")}</button>`;
     if (["file", "topic", "manual"].includes(state.route) && state.job && state.jobTab === state.route) main.innerHTML = workingPage();
-    else main.innerHTML = ({ file: filePage, topic: topicPage, manual: manualPage, profile: profilePage, "profile-edit": profileEditPage, premium: premiumPage, bonuses: bonusPage, quizzes: quizzesPage, result: resultPage, working: workingPage, interactive: interactive.hubPage, "interactive-create": interactive.createPage, "interactive-room": interactive.roomPage })[state.route]?.() || filePage();
+    else main.innerHTML = ({ file: filePage, topic: topicPage, manual: manualPage, profile: profilePage, "profile-edit": profileEditPage, premium: premiumPage, bonuses: bonusPage, support: supportPage, quizzes: quizzesPage, result: resultPage, working: workingPage, interactive: interactive.hubPage, "interactive-create": interactive.createPage, "interactive-room": interactive.roomPage })[state.route]?.() || filePage();
     if (auth && tg?.BackButton) {
-      if (["profile-edit", "premium", "bonuses", "quizzes", "result", "working", "interactive-create", "interactive-room"].includes(state.route)) tg.BackButton.show(); else tg.BackButton.hide();
+      if (["profile-edit", "premium", "bonuses", "support", "quizzes", "result", "working", "interactive-create", "interactive-room"].includes(state.route)) tg.BackButton.show(); else tg.BackButton.hide();
     }
     bindFileDrop();
+    if (state.route === "profile-edit" && avatarCropper.active) avatarCropper.bind(main.querySelector(".avatar-cropper"), state.busy || avatarLoading);
     if (state.route === "result" && state.quiz) loadImages(state.quiz.id);
     interactive.afterRender();
   }
@@ -241,6 +283,10 @@
     if (!form) return;
     if (interactive.capture(form)) return;
     const data = new FormData(form);
+    if (form.id === "support-form") {
+      if (!supportBusy) supportDraft = String(data.get("support_message") || "");
+      return;
+    }
     if (form.id === "profile-form") {
       profileDraft = { display_name: String(data.get("display_name") || ""), username: String(data.get("profile_username") || "") };
       return;
@@ -262,7 +308,7 @@
     state.error = null;
     state.route = route;
     if (["file", "topic", "manual", "profile"].includes(route)) state.tab = route;
-    else if (["profile-edit", "premium", "bonuses", "quizzes"].includes(route)) state.tab = "profile";
+    else if (["profile-edit", "premium", "bonuses", "support", "quizzes"].includes(route)) state.tab = "profile";
     else if (interactive.routes.includes(route)) state.tab = "interactive";
     const version = ++state.routeVersion;
     render();
@@ -328,11 +374,14 @@
   }
 
   function clearProfileDraft() {
+    ++avatarLoadTicket; avatarLoading = false;
+    avatarCropper.clear();
     if (avatarPreview) URL.revokeObjectURL(avatarPreview);
     avatarPreview = ""; pendingAvatar = null; removeAvatar = false; profileDraft = null;
   }
 
   async function prepareAvatar(file) {
+    if (avatarCropper.active) return avatarCropper.toFile();
     const url = URL.createObjectURL(file);
     try {
       const image = new Image();
@@ -405,14 +454,29 @@
   document.addEventListener("change", async e => {
     if (interactive.change(e.target)) return;
     if (e.target.id === "avatar-input") {
+      if (state.busy) return;
       const file = e.target.files[0];
       if (!file) return;
       if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) return toast(errorText("invalid_avatar"));
       if (file.size > 5 * 1024 * 1024) return toast(errorText("too_large"));
       capture();
-      if (avatarPreview) URL.revokeObjectURL(avatarPreview);
-      pendingAvatar = file; avatarPreview = URL.createObjectURL(file); removeAvatar = false;
-      render(); return;
+      const version = state.routeVersion;
+      const ticket = ++avatarLoadTicket;
+      avatarLoading = true;
+      render();
+      try {
+        if (!await avatarCropper.load(file)) return;
+        if (state.routeVersion !== version || state.route !== "profile-edit") { avatarCropper.clear(); return; }
+        if (avatarPreview) URL.revokeObjectURL(avatarPreview);
+        pendingAvatar = file; avatarPreview = ""; removeAvatar = false;
+      } catch { if (ticket === avatarLoadTicket) toast(errorText("invalid_avatar")); }
+      finally {
+        if (ticket === avatarLoadTicket) {
+          avatarLoading = false;
+          if (state.route === "profile-edit") render();
+        }
+      }
+      return;
     }
     if (e.target.id !== "ui-language") { if (e.target.closest("form")) capture(); return; }
     const previous = state.lang;
@@ -432,8 +496,11 @@
     if (button.dataset.go) { await navigate(button.dataset.go); return; }
     if (button.id === "profile-shortcut") { await navigate("profile"); return; }
     if (button.hasAttribute("data-avatar-choose")) { document.querySelector("#avatar-input").click(); return; }
+    if (button.hasAttribute("data-avatar-fit")) { avatarCropper.fit(); return; }
+    if (button.hasAttribute("data-avatar-reset")) { avatarCropper.reset(); return; }
     if (button.hasAttribute("data-avatar-remove")) {
       capture();
+      avatarCropper.clear();
       if (avatarPreview) URL.revokeObjectURL(avatarPreview);
       avatarPreview = ""; pendingAvatar = null; removeAvatar = true;
       render(); return;
@@ -457,7 +524,7 @@
     if (button.hasAttribute("data-copy") || button.hasAttribute("data-share")) {
       const link = botLink(`ref_${state.profile?.user.id}`);
       if (!link) return toast(tr("openTelegram"));
-      if (button.hasAttribute("data-share")) { openTelegram(`https://t.me/share?url=${encodeURIComponent(link)}`); return; }
+      if (button.hasAttribute("data-share")) { openTelegram(`https://t.me/share/url?url=${encodeURIComponent(link)}`); return; }
       try { await navigator.clipboard.writeText(link); toast(tr("copied")); }
       catch { toast(link); }
     }
@@ -473,8 +540,9 @@
     if (!(form instanceof HTMLFormElement) || state.busy) return;
     capture();
     if (!auth) return toast(tr("openTelegram"));
+    if (form.id === "support-form") { await sendSupport(); return; }
     if (form.id === "interactive-create-form") { await interactive.submit(form); return; }
-    if (form.id === "profile-form") { await saveProfile(); return; }
+    if (form.id === "profile-form") { if (!avatarLoading) await saveProfile(); return; }
     if (form.id === "file-form" && !state.file) return toast(tr("selectFile"));
     state.busy = true; state.error = null;
     const submit = form.querySelector('[type="submit"]');

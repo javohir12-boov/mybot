@@ -1,5 +1,7 @@
 # Render Deploy (AI Quez Bot)
 
+Telegram web ilovasi uchun Web Service, `WEBAPP_URL` va ishga tushirish tartibi: [WEBAPP.md](WEBAPP.md).
+
 ## Python versiyasi
 
 - Render default Python juda yangi bo'lib qolsa (masalan 3.14), `asyncpg` buildda xato berishi mumkin.

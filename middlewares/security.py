@@ -289,7 +289,8 @@ class SecurityMiddleware(BaseMiddleware):
         # Mandatory channel subscription gate (optional).
         is_check_sub = isinstance(event, types.CallbackQuery) and str(getattr(event, "data", "") or "") == "check_sub"
         is_ui_lang = self._is_ui_language_event(event)
-        if (not is_ui_lang) and self._channel_gate_enabled() and str(self.required_channel or "").strip():
+        is_support = bool(getattr(data.get("handler"), "flags", {}).get("support"))
+        if not (is_ui_lang or is_support) and self._channel_gate_enabled() and str(self.required_channel or "").strip():
             bot = None
             try:
                 bot = data.get("bot") or getattr(event, "bot", None)

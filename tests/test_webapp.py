@@ -28,6 +28,7 @@ from config import BOT_TOKEN
 from services import database as db
 from services.ai_service import AIServiceError
 from services.webapp import AppError, STATE, setup_webapp, stop_jobs, validate_init_data
+from services.support_service import SupportService
 
 
 QUESTION = {"question": "2 + 2 = ?", "options": ["1", "2", "3", "4"], "correct_index": 3, "explanation": "2 + 2 = 4"}
@@ -102,9 +103,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         return await self.client.post("/api/quizzes/file", data=form, headers=self.headers())
 
     async def test_static_app_and_api_authentication(self):
-        for path in ("/app", "/app/", "/app/assets/app.js", "/app/assets/app.css", "/app/assets/locales.js"):
+        for path in ("/app", "/app/", "/app/assets/app.js", "/app/assets/app.css", "/app/assets/locales.js", "/app/assets/avatar-cropper.js"):
             response = await self.client.get(path)
             self.assertEqual(response.status, 200, path)
+            self.assertEqual(response.headers.get("Cache-Control"), "no-cache", path)
         response = await self.client.get("/api/profile")
         self.assertEqual(response.status, 401)
         self.assertEqual((await response.json())["error"], "unauthorized")
@@ -118,6 +120,39 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(profile["quota"]["files_left"], 10)
         self.assertIn("30d", profile["plans"])
         self.assertEqual(profile["bot_username"], "test_quiz_bot")
+
+    async def test_support_requires_auth_and_uses_signed_identity(self):
+        self.bot.send_message = AsyncMock()
+        with patch("services.webapp.support_service", SupportService()), patch("services.support_service.ADMIN_IDS", [999]):
+            response = await self.client.post("/api/support", json={"message": "Help"})
+            self.assertEqual(response.status, 401)
+            self.bot.send_message.assert_not_awaited()
+            response = await self.client.post("/api/support", json={"message": " <b>Help</b> ", "user_id": 999}, headers=self.headers())
+            self.assertEqual(response.status, 200)
+            self.assertTrue((await response.json())["ok"])
+            args = self.bot.send_message.await_args
+            self.assertEqual(args.args[0], 999)
+            self.assertIn("Web ilova", args.args[1])
+            self.assertIn("<code>101</code>", args.args[1])
+            self.assertIn("&lt;b&gt;Help&lt;/b&gt;", args.args[1])
+            response = await self.client.post("/api/support", json={"message": "Again"}, headers=self.headers())
+            self.assertEqual(response.status, 429)
+            self.assertEqual((await response.json())["error"], "support_rate_limit")
+            self.bot.send_message.assert_awaited_once()
+
+    async def test_support_validation_and_delivery_failure_allow_retry(self):
+        self.bot.send_message = AsyncMock(side_effect=RuntimeError("unavailable"))
+        with patch("services.webapp.support_service", SupportService()), patch("services.support_service.ADMIN_IDS", [999]):
+            for message in (None, "", "  ", "x" * 3001, 123, {"text": "Help"}):
+                response = await self.client.post("/api/support", json={"message": message}, headers=self.headers())
+                self.assertEqual(response.status, 400)
+            self.bot.send_message.assert_not_awaited()
+            response = await self.client.post("/api/support", json={"message": "Help"}, headers=self.headers())
+            self.assertEqual(response.status, 503)
+            self.assertEqual((await response.json())["error"], "support_unavailable")
+            self.bot.send_message.side_effect = None
+            response = await self.client.post("/api/support", json={"message": "Help"}, headers=self.headers())
+            self.assertEqual(response.status, 200)
 
     async def test_language_saved_to_existing_user_settings(self):
         response = await self.client.patch("/api/settings", json={"ui_lang": "en"}, headers=self.headers())
@@ -178,6 +213,22 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(Path(self.avatar_temp.name).iterdir()), [])
         response = await self.client.get("/api/profile/avatar", headers=self.headers())
         self.assertEqual(response.status, 404)
+
+    async def test_avatar_fit_preserves_transparent_margins(self):
+        import fitz
+
+        image = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 768, 768), True)
+        image.clear_with()
+        image.set_rect(fitz.IRect(300, 50, 468, 718), (255, 0, 0, 255))
+        body = FormData()
+        body.add_field("avatar", io.BytesIO(image.tobytes("png")), filename="fit.png", content_type="image/png")
+        response = await self.client.post("/api/profile/avatar", data=body, headers=self.headers())
+        self.assertEqual(response.status, 200)
+        response = await self.client.get("/api/profile/avatar", headers=self.headers())
+        result = fitz.Pixmap(await response.read())
+        self.assertEqual((result.width, result.height), (384, 384))
+        self.assertEqual(result.pixel(0, 0)[-1], 0)
+        self.assertEqual(result.pixel(192, 192), (255, 0, 0, 255))
 
     async def test_avatar_rejects_disguised_and_oversized_uploads(self):
         for contents, status in [(b"<svg><script>alert(1)</script></svg>", 400), (b"x" * (5 * 1024 * 1024 + 1), 413)]:

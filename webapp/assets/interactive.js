@@ -202,7 +202,7 @@ window.createInteractive = function (ctx) {
       const name = ctx.profile()?.bot_username;
       if (!name || !ui.roomId) { toast(tr("openTelegram")); return true; }
       const link = `https://t.me/${encodeURIComponent(name)}?start=room_${ui.roomId}`;
-      if (button.hasAttribute("data-live-share")) ctx.openTelegram(`https://t.me/share?url=${encodeURIComponent(link)}`);
+      if (button.hasAttribute("data-live-share")) ctx.openTelegram(`https://t.me/share/url?url=${encodeURIComponent(link)}`);
       else { try { await navigator.clipboard.writeText(link); toast(tr("copied")); } catch { toast(link); } }
       return true;
     }

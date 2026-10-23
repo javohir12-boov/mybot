@@ -51,6 +51,16 @@ Polling va webhook rejimlarining ikkalasida ham web server ishlaydi. `main_noai.
 - Standart yuklash limiti hujjat va rasmlarda 5 MB, PPTX da 25 MB. Botdagi `MAX_UPLOAD_MB` va `MAX_UPLOAD_PPTX_MB` sozlamalari serverda ham qo‘llanadi.
 - Render’da doimiy ma’lumotlar uchun Postgres yoki persistent diskdan foydalaning. Botning maxfiy kalitlari frontendga berilmaydi.
 
+## Yordam
+
+Profil rasmi tanlanganda dumaloq ko‘rish oynasi ochiladi. Rasmni barmoq yoki sichqoncha bilan siljitish, ikki barmoq yoki surilma bilan kattalashtirish mumkin. **To‘liq sig‘dirish** uzun rasmning barcha qismini aylana ichiga joylaydi; **Markazga qaytarish** boshlang‘ich kesimni qaytaradi. **O‘zgarishlarni saqlash** tanlangan ko‘rinishni kvadrat PNG sifatida saqlaydi; barcha avatarlar shu kesimni doira ichida ko‘rsatadi.
+
+Web ilovada **Profil → Yordam** orqali adminga matnli xabar yuboriladi. Botning shaxsiy chatida **Yordam** tugmasi yoki `/help`, `/support`, `/yordam` buyruqlari shu imkoniyatni ochadi. Botdagi xabarni **Bekor qilish** yoki `/cancel` orqali bekor qilish mumkin.
+
+Xabarlar `.env` yoki hostingdagi mavjud `ADMIN_IDS` ro‘yxatiga yuboriladi. Administrator botni oldin `/start` orqali ochgan va bloklamagan bo‘lishi kerak. Xabarda foydalanuvchining Telegram ismi, IDsi, mavjud bo‘lsa username va yuborilgan joyi (web yoki bot) ko‘rsatiladi.
+
+Bir xabar 3000 belgigacha; web va bot uchun umumiy cheklov har daqiqada bitta xabar. Yuborish muvaffaqiyatsiz bo‘lsa, foydalanuvchi qayta urinishi mumkin. Kanal a’zoligini tekshirish ishlamayotganda ham yordam so‘rash mumkin. Yangilanishdan keyin bot/serverni qayta ishga tushiring va mini-ilovani qayta oching.
+
 ## Tekshirish
 
 ```powershell

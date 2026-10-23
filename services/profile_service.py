@@ -36,7 +36,7 @@ def normalize_avatar(raw):
             if len(info) != 1 or not 0 < info[0]["width"] * info[0]["height"] <= 16_000_000:
                 raise ProfileError("invalid_avatar")
             scale = min(1, 384 / max(page.rect.width, page.rect.height))
-            return page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False).tobytes("png")
+            return page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=True).tobytes("png")
     except Exception as exc:
         raise ProfileError("invalid_avatar") from exc
 

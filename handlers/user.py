@@ -1780,13 +1780,14 @@ def _kb_main_menu(ui_lang: str, *, user_id: int = 0, show_start_lang: bool = Fal
     kb.button(text=t(ui_lang, "btn_ui_lang"), callback_data="menu_ui_language")
     kb.button(text=t(ui_lang, "btn_premium"), callback_data="menu_premium")
     kb.button(text=t(ui_lang, "btn_bonuses"), callback_data="menu_bonus")
+    kb.button(text=t(ui_lang, "btn_support"), callback_data="menu_support")
     if int(user_id or 0) in set(int(x) for x in (ADMIN_IDS or [])):
         kb.button(text=t(ui_lang, "btn_admin_users"), callback_data="menu_admin_users")
 
     rows: list[int] = []
     if show_start_lang:
         rows.append(3)
-    rows.extend([2, 2, 2])
+    rows.extend([2, 2, 2, 1])
     if int(user_id or 0) in set(int(x) for x in (ADMIN_IDS or [])):
         rows.append(1)
     kb.adjust(*rows)
@@ -1822,6 +1823,12 @@ async def _replace_with_upload_hint(message: types.Message, text: str, **kwargs:
         return await _replace_or_answer(message, text, **kwargs)
 
 
+def _kb_quiz_menu_back(ui_lang: str) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(inline_keyboard=[[
+        types.InlineKeyboardButton(text=t(ui_lang, "btn_back"), callback_data="quiz_create_back")
+    ]])
+
+
 async def _open_upload_flow(message: types.Message, state: FSMContext, *, ui_lang: str, user_id: int = 0, replace: bool = False) -> None:
     # If the user was building a manual quiz and switched to another flow, persist the draft first.
     if int(user_id or 0):
@@ -1853,7 +1860,7 @@ async def _open_topic_flow(message: types.Message, state: FSMContext, *, user_id
         ai_topic_return="count",
     )
     await state.set_state(AIQuizStates.choose_topic)
-    await _send_or_replace(message, t(ui_lang, "topic_prompt"), replace=replace)
+    await _send_or_replace(message, t(ui_lang, "topic_prompt"), replace=replace, reply_markup=_kb_quiz_menu_back(ui_lang))
 
 
 async def _open_manual_quiz_flow(message: types.Message, state: FSMContext, *, user_id: int, ui_lang: str, replace: bool = False) -> None:
@@ -1873,7 +1880,7 @@ async def _open_manual_quiz_flow(message: types.Message, state: FSMContext, *, u
     await state.update_data(m_ui_lang=ui_lang)
     await state.set_state(ManualQuizStates.title)
     await _persist_manual_draft(state, user_id=user_id, chat_id=message.chat.id)
-    await _send_or_replace(message, t(ui_lang, "manual_title_prompt"), replace=replace)
+    await _send_or_replace(message, t(ui_lang, "manual_title_prompt"), replace=replace, reply_markup=_kb_quiz_menu_back(ui_lang))
 
 
 async def _resume_pending_after_sub(call: types.CallbackQuery, state: FSMContext) -> bool:
@@ -2227,7 +2234,7 @@ async def cmd_topic(message: types.Message, state: FSMContext, bot: Bot) -> None
         ai_topic_return="count",
     )
     await state.set_state(AIQuizStates.choose_topic)
-    await message.answer(t(ui_lang, "topic_prompt"))
+    await message.answer(t(ui_lang, "topic_prompt"), reply_markup=_kb_quiz_menu_back(ui_lang))
 
 
 @router.callback_query(F.data.startswith("quiz_share:"))
@@ -3406,6 +3413,21 @@ async def menu_topic(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> 
         await _open_topic_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang, replace=True)
 
 
+@router.callback_query(F.data == "quiz_create_back")
+async def quiz_create_back(call: types.CallbackQuery, state: FSMContext) -> None:
+    await call.answer()
+    if not call.message or str(call.message.chat.type) != "private":
+        return
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
+    await state.clear()
+    await _replace_or_answer(
+        call.message,
+        t(ui_lang, "menu_help"),
+        reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id),
+    )
+
+
 @router.callback_query(F.data == "menu_newquiz")
 async def menu_newquiz(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
     ui_lang = await _get_ui_lang(call.from_user.id)
@@ -4497,6 +4519,7 @@ def _kb_manual_draft_choice(*, ui_lang: str) -> types.InlineKeyboardMarkup:
     kb.button(text=t(ui_lang, "btn_manual_continue"), callback_data="m_draft:resume")
     kb.button(text=t(ui_lang, "btn_manual_restart"), callback_data="m_draft:restart")
     kb.adjust(2)
+    kb.row(types.InlineKeyboardButton(text=t(ui_lang, "btn_back"), callback_data="quiz_create_back"))
     return kb.as_markup()
 
 
@@ -4505,7 +4528,7 @@ def _manual_prompt_for_state(*, ui_lang: str, state_str: str, data: Dict[str, An
     st = str(state_str or "").strip()
 
     if st == ManualQuizStates.title.state or st.endswith(":title"):
-        return t(ui_lang, "manual_title_prompt"), None
+        return t(ui_lang, "manual_title_prompt"), _kb_quiz_menu_back(ui_lang)
     if st == ManualQuizStates.open_period.state or st.endswith(":open_period"):
         return t(ui_lang, "choose_time"), _kb_manual_time_presets(ui_lang=ui_lang)
     if st == ManualQuizStates.choose_shuffle.state or st.endswith(":choose_shuffle"):
@@ -4548,7 +4571,7 @@ def _manual_prompt_for_state(*, ui_lang: str, state_str: str, data: Dict[str, An
         lines.append(t(ui_lang, "manual_choose_correct"))
         return "\n".join([x for x in lines if x]), kb.as_markup()
 
-    return t(ui_lang, "manual_title_prompt"), None
+    return t(ui_lang, "manual_title_prompt"), _kb_quiz_menu_back(ui_lang)
 
 
 def _manual_draft_payload(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -4661,7 +4684,7 @@ async def manual_draft_restart(call: types.CallbackQuery, state: FSMContext) -> 
     await state.set_state(ManualQuizStates.title)
     if call.message:
         await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
-        await call.message.answer(t(ui_lang, "manual_title_prompt"))
+        await call.message.answer(t(ui_lang, "manual_title_prompt"), reply_markup=_kb_quiz_menu_back(ui_lang))
 
 
 @router.callback_query(F.data == "m_draft:resume")
@@ -4679,7 +4702,7 @@ async def manual_draft_resume(call: types.CallbackQuery, state: FSMContext) -> N
             except Exception:
                 pass
             await _persist_manual_draft(state, user_id=call.from_user.id, chat_id=call.message.chat.id)
-            await call.message.answer(t(ui_lang, "manual_title_prompt"))
+            await call.message.answer(t(ui_lang, "manual_title_prompt"), reply_markup=_kb_quiz_menu_back(ui_lang))
         return
 
     data = await _restore_manual_draft_if_needed(state, user_id=call.from_user.id, ui_lang=ui_lang)
@@ -4701,7 +4724,7 @@ async def manual_title(message: types.Message, state: FSMContext) -> None:
         ui_lang = await _get_ui_lang(message.from_user.id if message.from_user else 0)
     title = (message.text or "").strip()
     if not title:
-        await message.answer(t(ui_lang, "manual_title_required"))
+        await message.answer(t(ui_lang, "manual_title_required"), reply_markup=_kb_quiz_menu_back(ui_lang))
         return
 
     await state.update_data(title=title, questions=[], m_open_period=None, m_shuffle_mode="none", m_shuffle_strategy="saved")
@@ -5929,7 +5952,7 @@ async def ai_topic(call: types.CallbackQuery, state: FSMContext) -> None:
     mode = str(data.get("ai_mode") or "").strip().lower()
     prompt_key = "topic_prompt" if mode == "topic" else "file_topic_prompt"
     if call.message:
-        await call.message.answer(hint + t(ui_lang, prompt_key))
+        await call.message.answer(hint + t(ui_lang, prompt_key), reply_markup=_kb_quiz_menu_back(ui_lang) if mode == "topic" else None)
 
 
 def _first_int(text: str) -> Optional[int]:
@@ -6362,12 +6385,12 @@ async def ai_choose_topic_text(message: types.Message, state: FSMContext) -> Non
 
     raw = (message.text or "").strip()
     if raw and len(raw) > _TOPIC_MAX_CHARS:
-        await message.answer(t(ui_lang, 'topic_too_long', n=_TOPIC_MAX_CHARS))
+        await message.answer(t(ui_lang, 'topic_too_long', n=_TOPIC_MAX_CHARS), reply_markup=_kb_quiz_menu_back(ui_lang) if data.get("ai_mode") == "topic" else None)
         return
     if not raw:
         mode = str(data.get("ai_mode") or "").strip().lower()
         prompt_key = "topic_prompt" if mode == "topic" else "file_topic_prompt"
-        await message.answer(t(ui_lang, prompt_key))
+        await message.answer(t(ui_lang, prompt_key), reply_markup=_kb_quiz_menu_back(ui_lang) if mode == "topic" else None)
         return
 
     max_n = int(data.get("ai_max_questions") or 50)

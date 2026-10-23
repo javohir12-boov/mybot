@@ -18,6 +18,7 @@ from config import (
     WEBAPP_URL,
 )
 from handlers.miniapp import router as miniapp_router
+from handlers.support import router as support_router
 from handlers.user import router as user_router
 from middlewares.security import SecurityMiddleware
 from services.database import init_db, interrupt_unfinished_broadcasts
@@ -56,6 +57,7 @@ async def _setup_commands(bot: Bot) -> None:
     commands = [
         types.BotCommand(command="app", description="Web ilovani ochish"),
         types.BotCommand(command="menu", description="Menu"),
+        types.BotCommand(command="help", description="Yordam — adminga xabar yuborish"),
         types.BotCommand(command="til", description="Interface language"),
         types.BotCommand(command="newquiz", description="Create quiz manually"),
         types.BotCommand(command="mytests", description="My quizzes"),
@@ -230,6 +232,7 @@ async def main() -> None:
     await _setup_commands(bot)
 
     dp.include_router(miniapp_router)
+    dp.include_router(support_router)
     dp.include_router(user_router)
 
     health_runner = None

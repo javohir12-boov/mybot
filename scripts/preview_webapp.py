@@ -8,7 +8,13 @@ from aiohttp import web
 
 def create_preview():
     root = Path(__file__).resolve().parent.parent / "webapp"
-    app = web.Application()
+    @web.middleware
+    async def revalidate(request, handler):
+        response = await handler(request)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    app = web.Application(middlewares=[revalidate])
 
     async def index(_):
         return web.FileResponse(root / "index.html")

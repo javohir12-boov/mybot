@@ -39,3 +39,24 @@ for (const [lang, updates] of Object.entries(profileTranslations)) {
   Object.assign(window.QUIZ_LOCALES[lang], labels);
   Object.assign(window.QUIZ_LOCALES[lang].errors, errors);
 }
+
+const supportTranslations = {
+  uz: { support: "Yordam", supportIntro: "Savol yoki muammoingizni yozing. Xabaringiz adminga yuboriladi.", supportMessage: "Xabaringiz", supportPlaceholder: "Qanday yordam kerak?", supportHint: "3000 belgigacha. Har daqiqada bitta xabar yuborish mumkin.", supportSend: "Adminga yuborish", supportSent: "Xabaringiz adminga yuborildi.", errors: { invalid_support_message: "1–3000 belgidan iborat xabar yozing.", support_rate_limit: "Keyingi xabarni yuborish uchun 1 daqiqa kuting.", support_unavailable: "Xabarni adminga yuborib bo‘lmadi. Birozdan so‘ng qayta urinib ko‘ring." } },
+  en: { support: "Help", supportIntro: "Describe your question or problem. Your message will be sent to the administrator.", supportMessage: "Your message", supportPlaceholder: "How can we help?", supportHint: "Up to 3000 characters. You can send one message per minute.", supportSend: "Send to administrator", supportSent: "Your message was sent to the administrator.", errors: { invalid_support_message: "Write a message containing 1–3000 characters.", support_rate_limit: "Wait 1 minute before sending another message.", support_unavailable: "Could not send your message to the administrator. Please try again shortly." } },
+  ru: { support: "Помощь", supportIntro: "Опишите вопрос или проблему. Сообщение будет отправлено администратору.", supportMessage: "Ваше сообщение", supportPlaceholder: "Какая помощь вам нужна?", supportHint: "До 3000 символов. Можно отправлять одно сообщение в минуту.", supportSend: "Отправить администратору", supportSent: "Ваше сообщение отправлено администратору.", errors: { invalid_support_message: "Напишите сообщение длиной 1–3000 символов.", support_rate_limit: "Подождите 1 минуту перед отправкой следующего сообщения.", support_unavailable: "Не удалось отправить сообщение администратору. Попробуйте чуть позже." } }
+};
+for (const [lang, updates] of Object.entries(supportTranslations)) {
+  const { errors, ...labels } = updates;
+  Object.assign(window.QUIZ_LOCALES[lang], labels);
+  Object.assign(window.QUIZ_LOCALES[lang].errors, errors);
+}
+
+const cropTranslations = {
+  uz: { avatarCropTitle: "Rasmning ko‘rinadigan qismini tanlang", avatarCropHint: "Rasmni barmog‘ingiz bilan siljiting. Ikki barmoq yoki pastdagi surilma bilan kattalashtiring.", avatarZoom: "O‘lcham", avatarFit: "To‘liq sig‘dirish", avatarReset: "Markazga qaytarish", avatarCropSaveHint: "Doirada ko‘ringan holat «O‘zgarishlarni saqlash» bosilganda saqlanadi." },
+  ru: { avatarCropTitle: "Выберите видимую часть фото", avatarCropHint: "Перемещайте фото пальцем. Меняйте масштаб двумя пальцами или ползунком.", avatarZoom: "Масштаб", avatarFit: "Фото целиком", avatarReset: "По центру", avatarCropSaveHint: "Нажмите «Сохранить изменения», чтобы сохранить фото так, как оно выглядит в круге." },
+  en: { avatarCropTitle: "Choose the visible part of your photo", avatarCropHint: "Drag the photo to position it. Pinch or use the slider to zoom.", avatarZoom: "Zoom", avatarFit: "Fit entire photo", avatarReset: "Reset to center", avatarCropSaveHint: "Save changes to keep the photo exactly as it appears in the circle." }
+};
+for (const [lang, labels] of Object.entries(cropTranslations)) Object.assign(window.QUIZ_LOCALES[lang], labels);
+Object.assign(window.QUIZ_LOCALES.uz, { saveAvatar: "Rasmni saqlash", avatarCropSaveHint: "Doirada ko‘ringan qism «Rasmni saqlash» bosilganda aynan shu holatda saqlanadi." });
+Object.assign(window.QUIZ_LOCALES.ru, { saveAvatar: "Сохранить фото", avatarCropSaveHint: "Нажмите «Сохранить фото», чтобы сохранить выбранную область круга." });
+Object.assign(window.QUIZ_LOCALES.en, { saveAvatar: "Save photo", avatarCropSaveHint: "Save photo to keep exactly the area shown inside the circle." });

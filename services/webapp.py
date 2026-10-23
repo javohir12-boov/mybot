@@ -24,6 +24,7 @@ from services import database as db
 from services.ai_service import AIService, AIServiceError, extract_text_from_file
 from services.import_service import ImportServiceError, parse_quiz_payload, parse_quiz_xlsx
 from services.profile_service import ProfileError, normalize_avatar, remove_avatar, validate_profile
+from services.support_service import SupportError, support_service
 
 STATIC = Path(__file__).resolve().parent.parent / "webapp"
 AVATARS = STATIC.parent / "media" / "avatars"
@@ -65,7 +66,10 @@ def validate_init_data(raw, token=BOT_TOKEN, *, now=None, max_age=WEBAPP_AUTH_MA
 @web.middleware
 async def api_middleware(request, handler):
     if not request.path.startswith("/api/"):
-        return await handler(request)
+        response = await handler(request)
+        if request.path in {"/app", "/app/"} or request.path.startswith("/app/assets/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
     try:
         header = request.headers.get("Authorization", "")
         if not header.startswith("tma "):
@@ -86,6 +90,8 @@ async def api_middleware(request, handler):
         hits.append(now)
         response = await handler(request)
     except AppError as exc:
+        response = web.json_response({"error": exc.code}, status=exc.status)
+    except SupportError as exc:
         response = web.json_response({"error": exc.code}, status=exc.status)
     except ProfileError as exc:
         response = web.json_response({"error": str(exc)}, status=400)
@@ -264,6 +270,12 @@ async def delete_avatar(request):
         old = await db.update_web_profile(request[USER]["id"], avatar_path="")
         remove_avatar(old, AVATARS)
     return web.json_response({"profile": await public_profile(request[USER])})
+
+
+async def send_support(request):
+    data = await read_json(request)
+    await support_service.send(request.app[STATE]["bot"], request[USER], data.get("message"), source="web")
+    return web.json_response({"ok": True})
 
 
 async def update_settings(request):
@@ -583,6 +595,7 @@ def setup_webapp(app, bot):
     app.router.add_post("/api/profile/avatar", upload_avatar)
     app.router.add_delete("/api/profile/avatar", delete_avatar)
     app.router.add_patch("/api/settings", update_settings)
+    app.router.add_post("/api/support", send_support)
     app.router.add_get("/api/quizzes", list_quizzes)
     app.router.add_get("/api/quizzes/{id}", get_quiz)
     app.router.add_get("/api/quizzes/{id}/images/{question_id}", get_question_image)

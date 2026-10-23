@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Vaqtinchalik belgi. Bu faylni o‘z SVG logongiz bilan almashtiring. -->
+  <rect width="64" height="64" rx="16" fill="#6654e8"/>
+  <text x="32" y="40" text-anchor="middle" font-family="Arial,sans-serif" font-size="25" font-weight="700" fill="#fff">CQ</text>
+</svg>

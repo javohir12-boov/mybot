@@ -1,0 +1,89 @@
+nav { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; }
+.nav-item { min-width: 0; font-size: 9px; }
+.live-eyebrow { color: var(--green); }
+.live-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px #269b7112; flex-shrink: 0; }
+.live-categories { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin: 0 0 17px; }
+.live-category { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; border: 1px solid var(--line); background: var(--surface); border-radius: 13px; padding: 14px 2px 11px; color: var(--muted); font-size: 9px; min-width: 0; }
+.live-category svg { width: 22px; height: 22px; }
+.live-category span { max-width: 100%; overflow-wrap: anywhere; }
+.live-category.selected { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.live-category[data-live-category=love].selected { color: #d66088; background: #fff0f6; border-color: #e4a4bf; }
+.live-subjects { display: flex; gap: 7px; overflow-x: auto; max-width: 100%; margin: 0 0 22px; padding: 0 0 6px; scrollbar-width: none; }
+.live-subjects::-webkit-scrollbar { display: none; }
+.live-subject { border: 1px solid var(--line); color: var(--muted); background: var(--surface); border-radius: 20px; padding: 6px 12px; font-size: 10px; white-space: nowrap; }
+.live-subject.selected { background: var(--accent); color: var(--surface); border-color: var(--accent); }
+.live-section-head { display: flex; align-items: center; gap: 10px; justify-content: space-between; margin: 0 0 16px; }
+.live-section-head h2 { font: 700 14px 'Manrope', system-ui; margin: 0; }
+.live-switch { display: flex; gap: 12px; align-items: center; }
+.live-switch button { border: 0; background: none; padding: 5px 0; font-size: 11px; font-weight: 700; color: var(--muted); }
+.live-switch button.selected { color: var(--text); }
+.live-switch b { border-radius: 5px; padding: 1px 5px; background: var(--accent-soft); color: var(--accent); margin-inline-start: 3px; font-size: 9px; }
+.live-add { color: var(--accent); background: var(--accent-soft); width: 30px; height: 30px; }
+.live-quiz-card { padding: 17px 18px; margin-bottom: 11px; }
+.live-quiz-top { display: flex; align-items: center; gap: 7px; margin-bottom: 12px; }
+.live-quiz-top .small-icon { margin-inline-end: auto; }
+.live-quiz-card h3 { font: 700 14px/1.6 'Manrope', system-ui; margin: 0 0 5px; overflow-wrap: anywhere; }
+.live-quiz-card .muted { margin: 0 0 14px; }
+.live-card-bottom { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding-top: 12px; border-top: 1px solid var(--line); }
+.live-card-author { min-width: 0; }
+.live-card-author span { display: block; font-size: 10px; max-width: 155px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-card-author small { display: block; font-size: 9px; color: var(--muted); }
+.live-start { display: inline-flex; align-items: center; gap: 6px; background: var(--accent-soft); color: var(--accent); border: 0; padding: 8px 10px; border-radius: 8px; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.live-start svg { width: 14px; height: 14px; }
+.live-count { display: inline-flex; align-items: center; gap: 7px; color: var(--green); font-size: 10px; white-space: nowrap; }
+.live-online-card { margin-top: 23px; }
+.live-online-people { display: flex; gap: 14px; overflow-x: auto; padding: 5px 1px; }
+.live-online-people>div { width: 48px; flex-shrink: 0; text-align: center; }
+.live-person-avatar { width: 34px; height: 34px; display: inline-grid; place-items: center; flex-shrink: 0; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-size: 12px; font-weight: 700; }
+.live-online-people .live-person-avatar { width: 39px; height: 39px; }
+.live-online-people>div>span:last-child { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 9px; margin-top: 6px; color: var(--muted); }
+.live-rank { display: flex; gap: 10px; align-items: center; border-bottom: 1px solid var(--line); padding: 12px 0; }
+.live-rank:last-of-type { border-bottom: 0; }
+.live-rank-number { flex-shrink: 0; width: 18px; text-align: center; color: var(--muted); font-size: 11px; }
+.live-rank-number.top { color: var(--accent); font-weight: 800; }
+.live-rank>div { flex: 1; min-width: 0; }
+.live-rank strong { display: block; font-size: 11px; overflow-wrap: anywhere; }
+.live-rank small { display: block; font-size: 9px; color: var(--muted); }
+.live-rank-plays { text-align: end; flex-shrink: 0; }
+.live-rank-plays b { font-size: 16px; color: var(--accent); }
+.live-ranking-rule { border-top: 1px solid var(--line); margin: 10px 0 0; padding-top: 12px; font-size: 9px; }
+.live-source-switch { display: flex; gap: 8px; margin-bottom: 17px; }
+.live-source-switch button { flex: 1; border: 1px solid var(--line); border-radius: 9px; padding: 10px 7px; background: var(--surface); color: var(--muted); font-size: 11px; }
+.live-source-switch button.selected { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+.live-weight-tip { margin-bottom: 16px; }
+.live-weight { width: 55px; flex-shrink: 0; }
+.live-weight span { display: block; font-size: 8px; color: var(--muted); margin: 0 0 2px; }
+.live-weight input[type=number] { padding: 9px 6px; font-size: 11px; }
+.live-question-editor .answer-row { align-items: end; }
+.live-question-editor .answer-letter { align-self: center; }
+.live-question-editor input[type=radio] { align-self: center; }
+.live-room-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+.live-room-toolbar .back { margin-bottom: 0; }
+.live-room-meta { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+h1.live-room-title { font-size: 24px; line-height: 1.5; margin-bottom: 20px; overflow-wrap: anywhere; }
+.live-question-meta { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: var(--muted); margin-bottom: 13px; }
+.live-clock { background: var(--accent-soft); color: var(--accent); min-width: 41px; padding: 5px 8px; text-align: center; border-radius: 8px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.live-clock.urgent { color: var(--red); }
+.live-progress { height: 4px; background: var(--bg); border-radius: 5px; overflow: hidden; margin-bottom: 24px; }
+.live-progress span { display: block; background: var(--accent); height: 100%; border-radius: 5px; }
+.live-playing h2 { font: 700 18px/1.65 'Manrope', system-ui; margin-bottom: 23px; overflow-wrap: anywhere; }
+.live-options { display: grid; gap: 9px; }
+.live-option { border: 1px solid var(--line); background: var(--surface); border-radius: 11px; display: flex; align-items: center; gap: 11px; width: 100%; padding: 12px; text-align: start; }
+.live-option>span { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 7px; background: var(--bg); color: var(--muted); font-size: 10px; flex-shrink: 0; }
+.live-option b { font-size: 12px; font-weight: 500; flex: 1; overflow-wrap: anywhere; }
+.live-option.chosen { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.live-option.chosen>span { background: var(--accent); color: var(--surface); }
+.live-option:disabled { opacity: .75; }
+.live-option.chosen:disabled { opacity: 1; }
+.live-answer-hint { text-align: center; color: var(--muted); font-size: 10px; margin: 18px 0 0; }
+.live-result { text-align: center; }
+.live-result .success-symbol { margin: 7px auto 16px; }
+.live-result h2 { font-size: 21px; }
+.live-result>span { font-size: 11px; color: var(--muted); }
+.live-result .live-percent { display: block; color: var(--accent); font: 800 60px/1.5 'Manrope', system-ui; letter-spacing: -3px; }
+.live-result>p { font-size: 12px; }
+.live-result .primary { margin-top: 22px; }
+.live-question-image { max-width: 100%; max-height: 280px; object-fit: contain; border-radius: 9px; display: block; margin: 0 auto 20px; }
+.live-room-toolbar .icon-button { background: var(--accent-soft); color: var(--accent); }
+html[data-theme=dark] .live-category[data-live-category=love].selected { background: #3c2536; color: #f4a1c2; border-color: #88536c; }
+@media(max-width:360px) { .bottom-bar { padding-inline: 8px; } .nav-item { font-size: 8px; } .live-categories { gap: 4px; } .live-category { font-size: 8px; } .live-switch { gap: 9px; } .live-switch button { font-size: 10px; } .live-card-author span { max-width: 110px; } .live-start { font-size: 9px; padding: 8px; } }

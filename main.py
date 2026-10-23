@@ -15,10 +15,13 @@ from config import (
     WEBHOOK_URL,
     WEB_SERVER_HOST,
     WEB_SERVER_PORT,
+    WEBAPP_URL,
 )
+from handlers.miniapp import router as miniapp_router
 from handlers.user import router as user_router
 from middlewares.security import SecurityMiddleware
-from services.database import init_db
+from services.database import init_db, interrupt_unfinished_broadcasts
+from services.broadcast_service import broadcast_manager
 
 
 def _setup_logging() -> None:
@@ -51,6 +54,7 @@ def _setup_logging() -> None:
 
 async def _setup_commands(bot: Bot) -> None:
     commands = [
+        types.BotCommand(command="app", description="Web ilovani ochish"),
         types.BotCommand(command="menu", description="Menu"),
         types.BotCommand(command="til", description="Interface language"),
         types.BotCommand(command="newquiz", description="Create quiz manually"),
@@ -70,19 +74,26 @@ async def _setup_commands(bot: Bot) -> None:
     except Exception as exc:
         logging.warning("Bot commands set failed: %s", exc)
 
-    # Ensure the left "Menu" button opens commands (not a web app).
+    # A configured HTTPS address opens the Mini App inside Telegram.
     try:
-        await bot.set_chat_menu_button(menu_button=types.MenuButtonCommands())
-    except Exception:
-        pass
+        button = (
+            types.MenuButtonWebApp(text="Web ilova", web_app=types.WebAppInfo(url=WEBAPP_URL))
+            if WEBAPP_URL.startswith("https://") else types.MenuButtonCommands()
+        )
+        await bot.set_chat_menu_button(menu_button=button)
+    except Exception as exc:
+        logging.warning("Mini App menu setup failed: %s", exc)
 
 
-async def _run_health_server(*, host: str, port: int) -> object:
-    """Small HTTP server for Render health checks."""
+async def _run_health_server(bot: Bot, *, host: str, port: int) -> object:
+    """Serve the Mini App and health checks alongside polling."""
 
     from aiohttp import web
 
-    app = web.Application()
+    from services.webapp import setup_webapp
+
+    app = web.Application(client_max_size=32 * 1024 * 1024)
+    setup_webapp(app, bot)
 
     async def _health(_: web.Request) -> web.Response:
         return web.Response(text='ok')
@@ -94,7 +105,7 @@ async def _run_health_server(*, host: str, port: int) -> object:
     await runner.setup()
     site = web.TCPSite(runner, host=str(host or '0.0.0.0'), port=int(port or 8080))
     await site.start()
-    logging.info('Health server started on %s:%s', host, port)
+    logging.info('Mini App server started on %s:%s/app', host, port)
     return runner
 
 def _pick_keepalive_url() -> str:
@@ -159,7 +170,10 @@ async def _run_webhook(bot: Bot, dp: Dispatcher) -> None:
 
     secret = str(WEBHOOK_SECRET_TOKEN or "").strip() or None
 
-    app = web.Application()
+    from services.webapp import setup_webapp
+
+    app = web.Application(client_max_size=32 * 1024 * 1024)
+    setup_webapp(app, bot)
 
     async def _health(_: web.Request) -> web.Response:
         return web.Response(text='ok')
@@ -187,8 +201,10 @@ async def _run_webhook(bot: Bot, dp: Dispatcher) -> None:
     site = web.TCPSite(runner, host=str(WEB_SERVER_HOST or "0.0.0.0"), port=int(WEB_SERVER_PORT or 8080))
     await site.start()
 
-    # Keep running.
-    await asyncio.Event().wait()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await runner.cleanup()
 
 
 async def main() -> None:
@@ -209,20 +225,21 @@ async def main() -> None:
 
     # Database init (create tables if not exist)
     await init_db()
+    await interrupt_unfinished_broadcasts()
 
     await _setup_commands(bot)
 
+    dp.include_router(miniapp_router)
     dp.include_router(user_router)
 
     health_runner = None
-    # Render Web Service requires a listening port. If WEBHOOK_URL is not set,
-    # we still start a tiny health server so polling deployments don't fail.
-    if (not str(WEBHOOK_URL or '').strip()) and str(os.getenv('PORT') or '').strip():
-        try:
-            health_runner = await _run_health_server(host=str(WEB_SERVER_HOST or '0.0.0.0'), port=int(WEB_SERVER_PORT or 8080))
-        except Exception as exc:
-            logging.warning('Health server start failed: %s', exc)
-            health_runner = None
+    force_polling = str(os.getenv('FORCE_POLLING', '') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    webhook_url = str(WEBHOOK_URL or '').strip()
+    if webhook_url and not (webhook_url.startswith('http://') or webhook_url.startswith('https://')):
+        logging.warning('WEBHOOK_URL is invalid; falling back to polling')
+        webhook_url = ''
+    if force_polling or not webhook_url:
+        health_runner = await _run_health_server(bot, host=WEB_SERVER_HOST, port=WEB_SERVER_PORT)
 
     keepalive_task = None
     try:
@@ -248,12 +265,6 @@ async def main() -> None:
     except Exception as exc:
         logging.warning('Keepalive setup failed: %s', exc)
     try:
-        force_polling = str(os.getenv('FORCE_POLLING', '') or '').strip().lower() in {'1', 'true', 'yes', 'on'}
-        webhook_url = str(WEBHOOK_URL or '').strip()
-        if webhook_url and not (webhook_url.startswith('http://') or webhook_url.startswith('https://')):
-            logging.warning('WEBHOOK_URL is invalid (must start with http/https); falling back to polling')
-            webhook_url = ''
-
         if (not force_polling) and webhook_url:
             await _run_webhook(bot, dp)
         else:
@@ -266,6 +277,7 @@ async def main() -> None:
                 logging.warning('delete_webhook failed: %s', exc)
             await _run_polling(bot, dp)
     finally:
+        await broadcast_manager.shutdown()
         if keepalive_task is not None:
             keepalive_task.cancel()
             try:

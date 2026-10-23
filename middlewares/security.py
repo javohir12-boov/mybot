@@ -10,7 +10,7 @@ from aiogram.dispatcher.middlewares.base import BaseMiddleware
 
 from config import ADMIN_IDS, REQUIRED_CHANNEL, REQUIRED_CHANNEL_ENABLED
 from handlers.utils.i18n import norm_ui_lang, t
-from services.database import get_or_create_user, get_or_create_user_settings
+from services.database import get_or_create_user, get_or_create_user_settings, record_user_activity
 
 
 @dataclass
@@ -71,6 +71,7 @@ class SecurityMiddleware(BaseMiddleware):
         self._buckets: Dict[int, _Bucket] = {}
         self._last_warn: Dict[int, float] = {}
         self._last_user_refresh: Dict[int, float] = {}
+        self._last_activity_refresh: Dict[int, float] = {}
         self._ui_lang: Dict[int, Tuple[str, float]] = {}
         self._sub_cache: Dict[int, Tuple[bool, float]] = {}
         self._last_sub_prompt: Dict[int, float] = {}
@@ -87,7 +88,7 @@ class SecurityMiddleware(BaseMiddleware):
         if self._gc_ops % 5000 != 0:
             return
         now = time.monotonic()
-        for d in (self._buckets, self._last_warn, self._last_user_refresh, self._ui_lang, self._sub_cache, self._last_sub_prompt):
+        for d in (self._buckets, self._last_warn, self._last_user_refresh, self._last_activity_refresh, self._ui_lang, self._sub_cache, self._last_sub_prompt):
             for k, v in list(d.items()):
                 ts = v.updated_at if isinstance(v, _Bucket) else (v[1] if isinstance(v, tuple) else v)
                 if now - float(ts) > 24 * 60 * 60:
@@ -233,12 +234,12 @@ class SecurityMiddleware(BaseMiddleware):
         if now - last < float(self.user_refresh_ttl_sec):
             return
 
-        self._last_user_refresh[uid] = now
         try:
             await get_or_create_user(uid, full_name=str(user.full_name or ''), username=str(getattr(user, 'username', '') or ''))
             settings = await get_or_create_user_settings(uid)
             ui_lang = norm_ui_lang(str((settings or {}).get('ui_lang') or 'uz'))
             self._ui_lang[uid] = (ui_lang, now)
+            self._last_user_refresh[uid] = now
         except Exception:
             pass
 
@@ -277,6 +278,13 @@ class SecurityMiddleware(BaseMiddleware):
         is_admin = uid in set(ADMIN_IDS or [])
 
         await self._refresh_user(user)
+        now_activity = time.monotonic()
+        if now_activity - self._last_activity_refresh.get(uid, -300.0) >= 300:
+            try:
+                await record_user_activity(uid)
+                self._last_activity_refresh[uid] = now_activity
+            except Exception:
+                pass
 
         # Mandatory channel subscription gate (optional).
         is_check_sub = isinstance(event, types.CallbackQuery) and str(getattr(event, "data", "") or "") == "check_sub"

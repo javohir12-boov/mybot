@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, AsyncIterator, List, Optional
 
-from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, BigInteger, Text, desc, func, select
+from sqlalchemy import Boolean, Column, Float, ForeignKey, Index, Integer, BigInteger, Text, desc, func, select, union, update
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.engine.url import make_url
@@ -37,6 +37,36 @@ class UserSettings(Base):
     ui_lang_picked = Column(Boolean, default=False)
     # One-time optional channel bonus claimed flag.
     channel_bonus_claimed = Column(Boolean, default=False)
+
+
+class UserActivity(Base):
+    __tablename__ = "user_activity"
+    user_id = Column(BigInteger, ForeignKey("users.id"), primary_key=True)
+    last_seen_at = Column(Text, default="", index=True)
+
+
+class WebProfile(Base):
+    __tablename__ = "web_profiles"
+    user_id = Column(BigInteger, ForeignKey("users.id"), primary_key=True)
+    display_name = Column(Text, default="")
+    username = Column(Text, unique=True, nullable=True)
+    avatar_path = Column(Text, default="")
+    updated_at = Column(Text, default="")
+
+
+class BroadcastRun(Base):
+    __tablename__ = "broadcast_runs"
+    id = Column(Text, primary_key=True)
+    admin_id = Column(BigInteger, nullable=False)
+    mode = Column(Text, default="users")
+    status = Column(Text, default="sending")
+    total = Column(Integer, default=0)
+    sent = Column(Integer, default=0)
+    failed = Column(Integer, default=0)
+    blocked = Column(Integer, default=0)
+    batches = Column(Integer, default=0)
+    created_at = Column(Text, default="", index=True)
+    finished_at = Column(Text, default="")
 
 class FreeTrialQuota(Base):
     __tablename__ = 'free_trial_quotas'
@@ -147,6 +177,72 @@ class ManualQuizDraft(Base):
     state = Column(Text, default="")  # aiogram FSM state string
     data = Column(Text, default="{}")  # JSON-encoded FSM data
     updated_at = Column(Text, default="")  # ISO UTC
+
+
+class PublicQuiz(Base):
+    __tablename__ = "public_quizzes"
+    id = Column(Text, primary_key=True)
+    author_id = Column(BigInteger, ForeignKey("users.id"), nullable=True, index=True)
+    title = Column(Text, nullable=False)
+    category = Column(Text, nullable=False, index=True)
+    subject = Column(Text, default="general")
+    kind = Column(Text, default="knowledge")
+    questions = Column(Text, nullable=False)
+    open_period = Column(Integer, default=30)
+    created_at = Column(Float, nullable=False)
+
+
+class InteractiveRoom(Base):
+    __tablename__ = "interactive_rooms"
+    id = Column(Text, primary_key=True)
+    quiz_id = Column(Text, ForeignKey("public_quizzes.id"), nullable=False, index=True)
+    creator_id = Column(BigInteger, ForeignKey("users.id"), nullable=False)
+    title = Column(Text, nullable=False)
+    category = Column(Text, nullable=False, index=True)
+    subject = Column(Text, default="general")
+    kind = Column(Text, default="knowledge")
+    questions = Column(Text, nullable=False)
+    open_period = Column(Integer, default=30)
+    question_index = Column(Integer, default=0)
+    deadline = Column(Float, nullable=False)
+    idle_streak = Column(Integer, default=0)
+    status = Column(Text, default="active", index=True)
+    reason = Column(Text, default="")
+    created_at = Column(Float, nullable=False)
+
+
+class InteractiveMember(Base):
+    __tablename__ = "interactive_members"
+    room_id = Column(Text, ForeignKey("interactive_rooms.id"), primary_key=True)
+    user_id = Column(BigInteger, ForeignKey("users.id"), primary_key=True)
+    public_id = Column(Text, nullable=False, unique=True)
+    joined_at = Column(Float, nullable=False)
+    last_seen_at = Column(Float, nullable=False)
+    left = Column(Boolean, default=False)
+
+
+class InteractiveAnswer(Base):
+    __tablename__ = "interactive_answers"
+    room_id = Column(Text, ForeignKey("interactive_rooms.id"), primary_key=True)
+    user_id = Column(BigInteger, ForeignKey("users.id"), primary_key=True)
+    question_index = Column(Integer, primary_key=True)
+    option_index = Column(Integer, nullable=False)
+    points = Column(Integer, nullable=False)
+    answered_at = Column(Float, nullable=False)
+
+
+class PublicQuizCompletion(Base):
+    __tablename__ = "public_quiz_completions"
+    quiz_id = Column(Text, ForeignKey("public_quizzes.id"), primary_key=True)
+    user_id = Column(BigInteger, ForeignKey("users.id"), primary_key=True)
+    percent = Column(Integer, nullable=False)
+    completed_at = Column(Float, nullable=False)
+
+
+class InteractivePresence(Base):
+    __tablename__ = "interactive_presence"
+    user_id = Column(BigInteger, ForeignKey("users.id"), primary_key=True)
+    last_seen_at = Column(Float, nullable=False, index=True)
 # --- MODELLAR TUGASHI ---
 
 # Ma'lumotlar bazasiga ulanish sozlamalari (Async)
@@ -323,6 +419,7 @@ async def get_or_create_user(user_id: int, full_name: Optional[str] = None, user
 async def get_user_counts_summary() -> dict:
     now = datetime.now(timezone.utc)
     since = (now - timedelta(days=1)).replace(microsecond=0).isoformat()
+    month_since = (now - timedelta(days=30)).replace(microsecond=0).isoformat()
 
     async with async_session() as session:
         total_stmt = select(func.count()).select_from(User)
@@ -337,8 +434,19 @@ async def get_user_counts_summary() -> dict:
         attempts_last_24h_stmt = select(func.count()).select_from(QuizAttempt).where(QuizAttempt.completed_at >= since)
         attempts_last_24h = int((await session.execute(attempts_last_24h_stmt)).scalar() or 0)
 
-        active_users_last_24h_stmt = select(func.count(func.distinct(QuizAttempt.user_id))).where(QuizAttempt.completed_at >= since)
-        active_users_last_24h = int((await session.execute(active_users_last_24h_stmt)).scalar() or 0)
+        async def active_count(cutoff):
+            # Include historical quiz attempts and registrations; older menu
+            # interactions were not recorded before activity tracking existed.
+            ids = union(
+                select(UserActivity.user_id).where(UserActivity.last_seen_at >= cutoff),
+                select(QuizAttempt.user_id).where(QuizAttempt.completed_at >= cutoff),
+                select(User.id).where(User.created_at >= cutoff),
+            ).subquery()
+            return int((await session.execute(select(func.count()).select_from(ids))).scalar() or 0)
+
+        active_users_last_24h = await active_count(since)
+        active_users_last_30d = await active_count(month_since)
+        joined_last_30d = int((await session.execute(select(func.count()).select_from(User).where(User.created_at >= month_since))).scalar() or 0)
 
         return {
             'total_users': total,
@@ -346,8 +454,63 @@ async def get_user_counts_summary() -> dict:
             'total_quizzes': total_quizzes,
             'attempts_last_24h': attempts_last_24h,
             'active_users_last_24h': active_users_last_24h,
+            'active_users_last_30d': active_users_last_30d,
+            'joined_last_30d': joined_last_30d,
             'since_utc': since,
         }
+
+
+async def record_user_activity(user_id: int) -> None:
+    """Record authenticated bot use without changing the Telegram identity."""
+    async with async_session() as session:
+        row = await session.get(UserActivity, user_id)
+        if row is None:
+            session.add(UserActivity(user_id=user_id, last_seen_at=_utc_now_iso()))
+        else:
+            row.last_seen_at = _utc_now_iso()
+        await session.commit()
+
+
+async def get_web_profile(user_id: int) -> Optional[dict]:
+    async with async_session() as session:
+        row = await session.get(WebProfile, user_id)
+        if row is None:
+            return None
+        return {"display_name": row.display_name or "", "username": row.username or "",
+                "avatar_path": row.avatar_path or "", "updated_at": row.updated_at or ""}
+
+
+async def update_web_profile(user_id: int, *, display_name=None, username=None, avatar_path=None) -> str:
+    """Return the previous avatar path so the caller can remove an owned file."""
+    async with async_session() as session:
+        row = await session.get(WebProfile, user_id)
+        if row is None:
+            row = WebProfile(user_id=user_id)
+            session.add(row)
+        old_avatar = row.avatar_path or ""
+        if display_name is not None:
+            row.display_name = display_name
+        if username is not None:
+            row.username = username or None
+        if avatar_path is not None:
+            row.avatar_path = avatar_path
+        row.updated_at = _utc_now_iso()
+        await session.commit()
+        return old_avatar
+
+
+async def get_latest_broadcast() -> Optional[dict]:
+    async with async_session() as session:
+        row = (await session.execute(select(BroadcastRun).order_by(BroadcastRun.created_at.desc()).limit(1))).scalar_one_or_none()
+        if row is None:
+            return None
+        return {key: getattr(row, key) for key in ("id", "mode", "status", "total", "sent", "failed", "blocked", "batches")}
+
+
+async def interrupt_unfinished_broadcasts() -> None:
+    async with async_session() as session:
+        await session.execute(update(BroadcastRun).where(BroadcastRun.status == "sending").values(status="interrupted", finished_at=_utc_now_iso()))
+        await session.commit()
 
 
 async def list_broadcast_user_ids() -> List[int]:

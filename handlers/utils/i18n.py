@@ -2724,6 +2724,12 @@ for _code, _data in _FINAL_RUNTIME_FIXES.items():
     _STRINGS.setdefault(_code, {}).update(_data)
 
 
+from handlers.utils.admin_locales import ADMIN_STRINGS
+
+for _code in SUPPORTED_UI_LANGS:
+    _STRINGS.setdefault(_code, {}).update(ADMIN_STRINGS.get(_code, ADMIN_STRINGS["en"]))
+
+
 def norm_ui_lang(lang: str) -> str:
     x = (lang or "").strip().lower()
     if x in SUPPORTED_UI_LANGS:

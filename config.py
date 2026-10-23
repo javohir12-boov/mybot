@@ -137,6 +137,10 @@ THROTTLED_USERS: Dict[int, float] = {}
 WEBHOOK_URL = str(_get_env("WEBHOOK_URL", "") or "").strip()
 WEBHOOK_PATH = str(_get_env("WEBHOOK_PATH", "/webhook") or "/webhook").strip() or "/webhook"
 WEBHOOK_SECRET_TOKEN = str(_get_env("WEBHOOK_SECRET_TOKEN", "") or "").strip()
+# Public HTTPS address of the Mini App. Keep empty until the bot is deployed.
+_webapp_base = str(_get_env("RENDER_EXTERNAL_URL", "") or WEBHOOK_URL).strip().rstrip("/")
+WEBAPP_URL = str(_get_env("WEBAPP_URL", "") or (f"{_webapp_base}/app" if _webapp_base else "")).strip()
+WEBAPP_AUTH_MAX_AGE = int(_get_env("WEBAPP_AUTH_MAX_AGE", "86400"))
 WEB_SERVER_HOST = str(_get_env("WEB_SERVER_HOST", "0.0.0.0") or "0.0.0.0").strip() or "0.0.0.0"
 _port_raw = str(os.getenv('WEB_SERVER_PORT') or os.getenv('PORT') or '8080').strip()
 try:

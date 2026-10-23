@@ -30,6 +30,7 @@ from services.ai_service import AIService, AIServiceError, FRIENDLY_TOO_MANY_QUE
 from services.topic_context_service import fetch_topic_context
 from services.import_service import import_format_example, parse_quiz_payload, parse_quiz_xlsx
 from services.export_service import ExportServiceError, export_quiz_to_docx, suggest_docx_filename
+from services.broadcast_service import BroadcastBusy, broadcast_manager
 from services.database import (
     QuotaExceeded,
     check_user_quota,
@@ -47,8 +48,7 @@ from services.database import (
     get_quiz_with_questions,
     get_user_latest_quiz_attempt,
     get_user_counts_summary,
-    list_broadcast_group_chat_ids,
-    list_broadcast_user_ids,
+    get_latest_broadcast,
     get_user_quota_status,
     grant_user_premium,
     list_user_quizzes,
@@ -527,7 +527,7 @@ def _kb_upload_mode(ui_lang: str) -> types.InlineKeyboardMarkup:
     kb.button(text=t(ui_lang, "btn_upload_structured"), callback_data="upload_mode:structured")
     if AI_ENABLED:
         kb.button(text=t(ui_lang, "btn_upload_ai"), callback_data="upload_mode:ai")
-    kb.button(text=t(ui_lang, "btn_cancel"), callback_data="upload_mode:cancel")
+    kb.button(text=t(ui_lang, "btn_back"), callback_data="upload_mode:back")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -548,12 +548,22 @@ def _structured_sample_url() -> str:
     return ""
 
 
+def _upload_hint_image_path() -> Optional[Path]:
+    raw = str(os.getenv("UPLOAD_HINT_IMAGE_PATH") or "assets/upload_hint.jpg").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent.parent / path
+    return path if path.is_file() else None
+
+
 def _kb_structured_sample(ui_lang: str) -> Optional[types.InlineKeyboardMarkup]:
     url = _structured_sample_url()
-    if not url:
-        return None
     kb = InlineKeyboardBuilder()
-    kb.button(text=t(ui_lang, "btn_view_sample_file"), url=url)
+    if url:
+        kb.button(text=t(ui_lang, "btn_view_sample_file"), url=url)
+    kb.button(text=t(ui_lang, "btn_back"), callback_data="upload_structured_back")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -1784,25 +1794,51 @@ def _kb_main_menu(ui_lang: str, *, user_id: int = 0, show_start_lang: bool = Fal
     return kb.as_markup()
 
 
+async def _replace_or_answer(message: types.Message, text: str, **kwargs: Any) -> types.Message:
+    try:
+        return await message.edit_text(text, **kwargs)
+    except Exception as exc:
+        if "message is not modified" in str(exc).lower():
+            return message
+        return await message.answer(text, **kwargs)
 
 
-async def _open_upload_flow(message: types.Message, state: FSMContext, *, ui_lang: str, user_id: int = 0) -> None:
+async def _send_or_replace(message: types.Message, text: str, *, replace: bool = False, **kwargs: Any) -> types.Message:
+    if replace:
+        return await _replace_or_answer(message, text, **kwargs)
+    return await message.answer(text, **kwargs)
+
+
+async def _replace_with_upload_hint(message: types.Message, text: str, **kwargs: Any) -> types.Message:
+    image_path = _upload_hint_image_path()
+    if image_path is None:
+        return await _replace_or_answer(message, text, **kwargs)
+
+    try:
+        with suppress(Exception):
+            await message.delete()
+        return await message.answer_photo(photo=types.FSInputFile(str(image_path)), caption=text, **kwargs)
+    except Exception:
+        return await _replace_or_answer(message, text, **kwargs)
+
+
+async def _open_upload_flow(message: types.Message, state: FSMContext, *, ui_lang: str, user_id: int = 0, replace: bool = False) -> None:
     # If the user was building a manual quiz and switched to another flow, persist the draft first.
     if int(user_id or 0):
         await _persist_manual_draft(state, user_id=int(user_id), chat_id=int(message.chat.id))
     await state.clear()
     await state.update_data(upload_ui_lang=ui_lang, upload_user_id=int(user_id or 0))
     await state.set_state(UploadStates.choose_type)
-    await message.answer(t(ui_lang, "upload_mode_prompt"), reply_markup=_kb_upload_mode(ui_lang))
+    await _send_or_replace(message, t(ui_lang, "upload_mode_prompt"), replace=replace, reply_markup=_kb_upload_mode(ui_lang))
 
 
-async def _open_topic_flow(message: types.Message, state: FSMContext, *, user_id: int, ui_lang: str) -> None:
+async def _open_topic_flow(message: types.Message, state: FSMContext, *, user_id: int, ui_lang: str, replace: bool = False) -> None:
     # If the user was building a manual quiz and switched to another flow, persist the draft first.
     if int(user_id or 0):
         await _persist_manual_draft(state, user_id=int(user_id), chat_id=int(message.chat.id))
     await state.clear()
     if not AI_ENABLED:
-        await message.answer(t(ui_lang, "ai_disabled"))
+        await _send_or_replace(message, t(ui_lang, "ai_disabled"), replace=replace)
         return
     session_id = uuid.uuid4().hex
     await state.update_data(
@@ -1817,22 +1853,27 @@ async def _open_topic_flow(message: types.Message, state: FSMContext, *, user_id
         ai_topic_return="count",
     )
     await state.set_state(AIQuizStates.choose_topic)
-    await message.answer(t(ui_lang, "topic_prompt"))
+    await _send_or_replace(message, t(ui_lang, "topic_prompt"), replace=replace)
 
 
-async def _open_manual_quiz_flow(message: types.Message, state: FSMContext, *, user_id: int, ui_lang: str) -> None:
+async def _open_manual_quiz_flow(message: types.Message, state: FSMContext, *, user_id: int, ui_lang: str, replace: bool = False) -> None:
     # If the user was building a manual quiz and re-opened /newquiz, persist the draft first.
     if int(user_id or 0):
         await _persist_manual_draft(state, user_id=int(user_id), chat_id=int(message.chat.id))
     await state.clear()
     draft = await get_manual_quiz_draft(user_id=user_id)
     if draft and str(draft.get("state") or "").strip():
-        await message.answer(t(ui_lang, "manual_draft_found"), reply_markup=_kb_manual_draft_choice(ui_lang=ui_lang))
+        await _send_or_replace(
+            message,
+            t(ui_lang, "manual_draft_found"),
+            replace=replace,
+            reply_markup=_kb_manual_draft_choice(ui_lang=ui_lang),
+        )
         return
     await state.update_data(m_ui_lang=ui_lang)
     await state.set_state(ManualQuizStates.title)
     await _persist_manual_draft(state, user_id=user_id, chat_id=message.chat.id)
-    await message.answer(t(ui_lang, "manual_title_prompt"))
+    await _send_or_replace(message, t(ui_lang, "manual_title_prompt"), replace=replace)
 
 
 async def _resume_pending_after_sub(call: types.CallbackQuery, state: FSMContext) -> bool:
@@ -1841,13 +1882,13 @@ async def _resume_pending_after_sub(call: types.CallbackQuery, state: FSMContext
         return False
     ui_lang = await _get_ui_lang(call.from_user.id)
     if action == "menu_upload":
-        await _open_upload_flow(call.message, state, ui_lang=ui_lang, user_id=call.from_user.id)
+        await _open_upload_flow(call.message, state, ui_lang=ui_lang, user_id=call.from_user.id, replace=True)
         return True
     if action == "menu_topic":
-        await _open_topic_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang)
+        await _open_topic_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang, replace=True)
         return True
     if action == "menu_newquiz":
-        await _open_manual_quiz_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang)
+        await _open_manual_quiz_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang, replace=True)
         return True
     return False
 
@@ -3201,7 +3242,7 @@ async def menu_ui_language(call: types.CallbackQuery, bot: Bot) -> None:
         await _send_private_only_notice(call, bot, ui_lang=ui_lang)
         return
     if call.message:
-        await call.message.answer(_START_LANG_PROMPT, reply_markup=_kb_ui_language_settings(ui_lang))
+        await _replace_or_answer(call.message, _START_LANG_PROMPT, reply_markup=_kb_ui_language_settings(ui_lang))
 
 
 @router.message(Command("language"))
@@ -3222,10 +3263,10 @@ async def menu_language(call: types.CallbackQuery, bot: Bot) -> None:
     ui_lang = await _get_ui_lang(call.from_user.id)
     if not AI_ENABLED:
         if call.message:
-            await call.message.answer(t(ui_lang, "ai_disabled"))
+            await _replace_or_answer(call.message, t(ui_lang, "ai_disabled"))
         return
     if call.message:
-        await call.message.answer(t(ui_lang, "ai_lang_choose"), reply_markup=_kb_ai_language_settings(ui_lang))
+        await _replace_or_answer(call.message, t(ui_lang, "ai_lang_choose"), reply_markup=_kb_ai_language_settings(ui_lang))
 
 
 @router.callback_query(F.data.startswith("set_ui_lang:"))
@@ -3247,9 +3288,10 @@ async def set_ui_lang(call: types.CallbackQuery) -> None:
     await call.answer(t(ui_lang, "saved_short"))
     if call.message:
         if not was_picked:
-            await call.message.answer(get_about_text(ui_lang), reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0))
+            await _replace_or_answer(call.message, get_about_text(ui_lang), reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0))
         else:
-            await call.message.answer(
+            await _replace_or_answer(
+                call.message,
                 t(ui_lang, "ui_lang_saved", lang_name=lang_name(ui_lang)),
                 reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0),
             )
@@ -3266,7 +3308,8 @@ async def start_set_ui_lang(call: types.CallbackQuery) -> None:
     _set_ui_lang_cache(call.from_user.id, ui_lang)
     await call.answer(t(ui_lang, "saved_short"))
     if call.message:
-        await call.message.answer(
+        await _replace_or_answer(
+            call.message,
             get_about_text(ui_lang),
             reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0),
         )
@@ -3285,7 +3328,7 @@ async def set_lang(call: types.CallbackQuery) -> None:
     await call.answer(t(ui_lang, "saved_short"))
     if call.message:
         name = t(ui_lang, "lang_source") if lang == "source" else lang_name(lang)
-        await call.message.answer(t(ui_lang, "ai_lang_saved", lang_name=name))
+        await _replace_or_answer(call.message, t(ui_lang, "ai_lang_saved", lang_name=name))
 
 
 @router.callback_query(F.data == "menu_upload")
@@ -3298,7 +3341,7 @@ async def menu_upload(call: types.CallbackQuery, state: FSMContext, bot: Bot) ->
         return
     await call.answer()
     if call.message:
-        await _open_upload_flow(call.message, state, ui_lang=ui_lang, user_id=call.from_user.id)
+        await _open_upload_flow(call.message, state, ui_lang=ui_lang, user_id=call.from_user.id, replace=True)
 
 
 @router.callback_query(F.data.startswith("upload_mode:"))
@@ -3310,11 +3353,15 @@ async def upload_mode_choose(call: types.CallbackQuery, state: FSMContext) -> No
         return
 
     mode = str(call.data or "").split(":", 1)[1].strip().lower()
-    if mode == "cancel":
+    if mode in {"back", "cancel"}:
         await state.clear()
         await call.answer()
         if call.message:
-            await call.message.answer(t(ui_lang, "cancelled"))
+            await _replace_or_answer(
+                call.message,
+                t(ui_lang, "menu_help"),
+                reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0),
+            )
         return
     if mode not in {"structured", "ai"}:
         await call.answer(t(ui_lang, "invalid_button"), show_alert=True)
@@ -3329,7 +3376,21 @@ async def upload_mode_choose(call: types.CallbackQuery, state: FSMContext) -> No
     if call.message:
         key = "upload_hint_structured" if mode == "structured" else "upload_hint"
         reply_markup = _kb_structured_sample(ui_lang) if mode == "structured" else None
-        await call.message.answer(t(ui_lang, key), reply_markup=reply_markup)
+        if mode == "ai":
+            await _replace_with_upload_hint(call.message, t(ui_lang, key), reply_markup=reply_markup)
+        else:
+            await _replace_or_answer(call.message, t(ui_lang, key), reply_markup=reply_markup)
+
+
+@router.callback_query(F.data == "upload_structured_back")
+async def upload_structured_back(call: types.CallbackQuery, state: FSMContext) -> None:
+    ui_lang = await _get_ui_lang(call.from_user.id)
+    await state.clear()
+    await state.update_data(upload_ui_lang=ui_lang, upload_user_id=call.from_user.id)
+    await state.set_state(UploadStates.choose_type)
+    await call.answer()
+    if call.message:
+        await _replace_or_answer(call.message, t(ui_lang, "upload_mode_prompt"), reply_markup=_kb_upload_mode(ui_lang))
 
 
 @router.callback_query(F.data == "menu_topic")
@@ -3342,7 +3403,7 @@ async def menu_topic(call: types.CallbackQuery, state: FSMContext, bot: Bot) -> 
         return
     await call.answer()
     if call.message:
-        await _open_topic_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang)
+        await _open_topic_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang, replace=True)
 
 
 @router.callback_query(F.data == "menu_newquiz")
@@ -3355,7 +3416,7 @@ async def menu_newquiz(call: types.CallbackQuery, state: FSMContext, bot: Bot) -
         return
     await call.answer()
     if call.message:
-        await _open_manual_quiz_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang)
+        await _open_manual_quiz_flow(call.message, state, user_id=call.from_user.id, ui_lang=ui_lang, replace=True)
 
 
 
@@ -3495,7 +3556,7 @@ async def menu_premium(call: types.CallbackQuery, bot: Bot) -> None:
         return
     st = await get_user_quota_status(call.from_user.id)
     if call.message:
-        await call.message.answer(_premium_menu_text(ui_lang, st), reply_markup=_kb_premium_plans(ui_lang))
+        await _replace_or_answer(call.message, _premium_menu_text(ui_lang, st), reply_markup=_kb_premium_plans(ui_lang))
 
 
 @router.callback_query(F.data == 'menu_bonus')
@@ -3506,7 +3567,7 @@ async def menu_bonus(call: types.CallbackQuery, bot: Bot) -> None:
         await _send_private_only_notice(call, bot, ui_lang=ui_lang)
         return
     if call.message:
-        await call.message.answer(_bonus_menu_text(ui_lang), reply_markup=_kb_bonus_menu(ui_lang), disable_web_page_preview=True)
+        await _replace_or_answer(call.message, _bonus_menu_text(ui_lang), reply_markup=_kb_bonus_menu(ui_lang), disable_web_page_preview=True)
 
 
 @router.callback_query(F.data == 'prem_ref')
@@ -3525,7 +3586,7 @@ async def prem_ref(call: types.CallbackQuery, bot: Bot) -> None:
     to_next = int(st.get('to_next_reward') or 3)
     msg = t(ui_lang, 'ref_info', link=link or '-', total=total, qualified=qualified, pending=pending, unr=unr, to_next=to_next)
     if call.message:
-        await call.message.answer(msg, disable_web_page_preview=True)
+        await _replace_or_answer(call.message, msg, disable_web_page_preview=True)
 
 
 @router.callback_query(F.data == 'prem_channel_bonus')
@@ -3540,7 +3601,7 @@ async def prem_back(call: types.CallbackQuery) -> None:
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
     if call.message:
-        await call.message.answer(t(ui_lang, "menu_help"), reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0))
+        await _replace_or_answer(call.message, t(ui_lang, "menu_help"), reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0))
 
 
 @router.callback_query(F.data == 'bonus_back')
@@ -3548,7 +3609,8 @@ async def bonus_back(call: types.CallbackQuery) -> None:
     await call.answer()
     ui_lang = await _get_ui_lang(call.from_user.id)
     if call.message:
-        await call.message.answer(
+        await _replace_or_answer(
+            call.message,
             t(ui_lang, "menu_help"),
             reply_markup=_kb_main_menu(ui_lang, user_id=call.from_user.id if call.from_user else 0),
         )
@@ -3565,7 +3627,7 @@ async def prem_pay(call: types.CallbackQuery, state: FSMContext) -> None:
 
     if not _PAYMENT_CARD_NUMBER:
         if call.message:
-            await call.message.answer(t(ui_lang, 'payment_card_missing'))
+            await _replace_or_answer(call.message, t(ui_lang, 'payment_card_missing'))
         return
 
     p = _PREMIUM_PLANS.get(code) or {}
@@ -3577,7 +3639,7 @@ async def prem_pay(call: types.CallbackQuery, state: FSMContext) -> None:
 
     holder = _PAYMENT_CARD_HOLDER or '-'
     if call.message:
-        await call.message.answer(
+        payment_text = (
             t(
                 ui_lang,
                 'payment_card_info',
@@ -3586,8 +3648,13 @@ async def prem_pay(call: types.CallbackQuery, state: FSMContext) -> None:
                 plan=t(ui_lang, f'premium_plan_{code}'),
                 price=_fmt_money_uzs(price),
             )
+            + "\n\n"
+            + t(ui_lang, 'premium_send_screenshot')
         )
-        await call.message.answer(t(ui_lang, 'premium_send_screenshot'))
+        await _replace_or_answer(
+            call.message,
+            payment_text,
+        )
 
 
 @router.callback_query(F.data.startswith('prem_buy:'))
@@ -3615,7 +3682,8 @@ async def prem_buy(call: types.CallbackQuery, state: FSMContext) -> None:
     kb.adjust(1)
 
     if call.message:
-        await call.message.answer(
+        await _replace_or_answer(
+            call.message,
             t(
                 ui_lang,
                 'premium_plan_details',
@@ -4166,20 +4234,25 @@ async def menu_admin_users(call: types.CallbackQuery, bot: Bot) -> None:
     try:
         stats = await get_user_counts_summary()
     except Exception as exc:
-        await call.message.answer(t(ui_lang, 'err_unexpected', err=str(exc)))
+        if call.message:
+            await _replace_or_answer(call.message, t(ui_lang, 'err_unexpected', err=str(exc)))
         return
-    await call.message.answer(
-        t(
-            ui_lang,
-            'admin_users_stats',
-            total=int(stats.get('total_users') or 0),
-            joined=int(stats.get('joined_last_24h') or 0),
-            active=int(stats.get('active_users_last_24h') or 0),
-            quizzes=int(stats.get('total_quizzes') or 0),
-            attempts=int(stats.get('attempts_last_24h') or 0),
-        ),
-        reply_markup=_kb_admin_panel(ui_lang),
-    )
+    if call.message:
+        await _replace_or_answer(
+            call.message,
+            t(
+                ui_lang,
+                'admin_users_stats',
+                total=int(stats.get('total_users') or 0),
+                joined=int(stats.get('joined_last_24h') or 0),
+                active=int(stats.get('active_users_last_24h') or 0),
+                quizzes=int(stats.get('total_quizzes') or 0),
+                attempts=int(stats.get('attempts_last_24h') or 0),
+                active_month=int(stats.get('active_users_last_30d') or 0),
+                joined_month=int(stats.get('joined_last_30d') or 0),
+            ) + await _last_broadcast_text(ui_lang),
+            reply_markup=_kb_admin_panel(ui_lang),
+        )
     await call.answer()
 
 
@@ -4193,11 +4266,15 @@ async def admin_broadcast_select(call: types.CallbackQuery, state: FSMContext, b
         await _send_private_only_notice(call, bot, ui_lang=ui_lang)
         return
     mode = str((call.data or '').split(':', 1)[1] or '').strip().lower()
+    if mode == 'stop':
+        stopped = broadcast_manager.stop(call.from_user.id)
+        await call.answer(t(ui_lang, 'admin_broadcast_stopping' if stopped else 'admin_broadcast_not_running'))
+        return
     if mode == 'cancel':
         await state.clear()
         await call.answer(t(ui_lang, 'admin_broadcast_cancelled'))
         if call.message:
-            await call.message.answer(t(ui_lang, 'admin_broadcast_cancelled'), reply_markup=_kb_admin_panel(ui_lang))
+            await _replace_or_answer(call.message, t(ui_lang, 'admin_broadcast_cancelled'), reply_markup=_kb_admin_panel(ui_lang))
         return
     if mode not in {'users', 'groups'}:
         await call.answer()
@@ -4207,7 +4284,7 @@ async def admin_broadcast_select(call: types.CallbackQuery, state: FSMContext, b
     await call.answer()
     if call.message:
         key = 'admin_broadcast_users_prompt' if mode == 'users' else 'admin_broadcast_groups_prompt'
-        await call.message.answer(t(ui_lang, key), reply_markup=_kb_admin_broadcast_cancel(ui_lang))
+        await _replace_or_answer(call.message, t(ui_lang, key), reply_markup=_kb_admin_broadcast_cancel(ui_lang))
 
 
 @router.message(AdminBroadcastStates.waiting_message)
@@ -4219,29 +4296,30 @@ async def admin_broadcast_message(message: types.Message, state: FSMContext, bot
         await state.clear()
         await message.answer(t(ui_lang, 'admin_only'))
         return
-    raw = (message.text or message.caption or '').strip()
-    if not raw:
+    if message.content_type not in {'text', 'photo', 'video', 'animation', 'document', 'audio', 'voice', 'video_note', 'sticker'}:
         await message.answer(t(ui_lang, 'admin_broadcast_text_required'), reply_markup=_kb_admin_broadcast_cancel(ui_lang))
         return
     data = await state.get_data()
     mode = str(data.get('admin_broadcast_mode') or 'users').strip().lower()
-    await state.clear()
-    targets = await (list_broadcast_user_ids() if mode == 'users' else list_broadcast_group_chat_ids())
-    if not targets:
-        await message.answer(t(ui_lang, 'admin_broadcast_no_targets'), reply_markup=_kb_admin_panel(ui_lang))
+    status = await message.answer(t(ui_lang, 'admin_broadcast_sending', total='…'))
+    try:
+        progress = await broadcast_manager.start(bot=bot, message=message, status_message=status,
+                                                  mode=mode, admin_id=message.from_user.id, ui_lang=ui_lang)
+    except BroadcastBusy:
+        await status.edit_text(t(ui_lang, 'admin_broadcast_busy'))
         return
-    status = await message.answer(t(ui_lang, 'admin_broadcast_sending', total=len(targets)))
-    sent = 0
-    failed = 0
-    for target in targets:
-        try:
-            await bot.send_message(int(target), raw, disable_web_page_preview=False)
-            sent += 1
-        except Exception:
-            failed += 1
-        await asyncio.sleep(0.03)
-    await status.edit_text(t(ui_lang, 'admin_broadcast_done', sent=sent, failed=failed, total=len(targets)))
-    await message.answer(t(ui_lang, 'admin_broadcast_panel'), reply_markup=_kb_admin_panel(ui_lang))
+    await state.clear()
+    if progress is None:
+        await status.edit_text(t(ui_lang, 'admin_broadcast_no_targets'), reply_markup=_kb_admin_panel(ui_lang))
+
+
+async def _last_broadcast_text(ui_lang: str) -> str:
+    run = await get_latest_broadcast()
+    if not run:
+        return ''
+    return '\n\n' + t(ui_lang, 'admin_broadcast_last', total=run['total'], sent=run['sent'], failed=run['failed'],
+                       remaining=max(0, run['total'] - run['sent'] - run['failed']),
+                       status=t(ui_lang, 'broadcast_status_' + run['status']))
 
 def _kb_mytests_more(ui_lang: str, *, before_id: int) -> types.InlineKeyboardMarkup:
     ui_lang = norm_ui_lang(ui_lang)
@@ -4364,13 +4442,13 @@ async def menu_cancel(call: types.CallbackQuery, state: FSMContext, bot: Bot) ->
     cancelled = await _cancel_user_runs(bot, chat_id=chat_id, user_id=call.from_user.id)
     if cancelled == 0 and _has_foreign_active_run(chat_id, call.from_user.id):
         if call.message:
-            await call.message.answer(t(ui_lang, "group_stop_owner_only"))
+            await _replace_or_answer(call.message, t(ui_lang, "group_stop_owner_only"))
         return
     await state.clear()
     await clear_manual_quiz_draft(user_id=call.from_user.id)
     if call.message:
         ui_lang = await _get_ui_lang(call.from_user.id)
-        await call.message.answer(t(ui_lang, "stopped_n", n=cancelled))
+        await _replace_or_answer(call.message, t(ui_lang, "stopped_n", n=cancelled))
 
 
 @router.message(Command("newquiz"))

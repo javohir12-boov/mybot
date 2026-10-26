@@ -2,7 +2,12 @@
 (() => {
   const tg = window.Telegram?.WebApp;
   const main = document.querySelector("#main");
-  const auth = tg?.initData || "";
+  // Preserve Telegram's signed launch data when the SDK is temporarily unavailable.
+  // The server still verifies every signature; no browser-supplied user ID is used.
+  let auth = tg?.initData || new URLSearchParams(location.hash.slice(1)).get("tgWebAppData") || "";
+  const authErrors = new Set(["unauthorized", "telegram_required", "invalid_init_data", "invalid_signature", "session_expired", "session_clock"]);
+  let appInfo = null;
+  let appInfoRequest = null;
   const icons = {
     file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M8 13h8M8 17h5"/>',
     spark: '<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/><path d="m20 2 .6 1.4L22 4l-1.4.6L20 6l-.6-1.4L18 4l1.4-.6Z"/>',
@@ -40,9 +45,6 @@
   const state = { lang: "uz", tab: "file", route: "file", profile: null, file: null, fileOptions: defaultOptions(), topicOptions: defaultOptions(), topic: "", manual: { title: "", questions: [blankQuestion()], ...defaultOptions() }, job: null, readyId: null, error: null, quiz: null, quizzes: [], next: null, busy: false, routeVersion: 0 };
   let userKey = "guest";
   let profileDraft = null;
-  let supportDraft = "";
-  let supportBusy = false;
-  let supportSent = false;
   let avatarUrl = "";
   let pendingAvatar = null;
   let avatarPreview = "";
@@ -67,6 +69,7 @@
   }
 
   async function api(path, { method = "GET", body } = {}) {
+    auth = tg?.initData || auth;
     if (!auth) throw Object.assign(new Error(tr("openTelegram")), { code: "unauthorized" });
     const headers = { Authorization: `tma ${auth}` };
     if (body && !(body instanceof FormData)) { headers["Content-Type"] = "application/json"; body = JSON.stringify(body); }
@@ -75,8 +78,20 @@
     catch { throw Object.assign(new Error(errorText("network")), { code: "network" }); }
     let data;
     try { data = await response.json(); } catch { throw Object.assign(new Error(errorText("server_error")), { code: "server_error" }); }
-    if (!response.ok) throw Object.assign(new Error(errorText(data.error)), { code: data.error });
+    if (!response.ok) {
+      const code = response.status === 401 && authErrors.has(data.reason) ? data.reason : data.error;
+      if (response.status === 401) await loadAppInfo();
+      throw Object.assign(new Error(errorText(code)), { code });
+    }
     return data;
+  }
+
+  async function loadAppInfo() {
+    if (!appInfoRequest) appInfoRequest = fetch("/app/config.json", { cache: "no-store" })
+      .then(response => response.ok ? response.json() : null)
+      .then(info => { if (/^[A-Za-z0-9_]+$/.test(info?.bot_username || "")) appInfo = info; })
+      .catch(() => { appInfoRequest = null; });
+    await appInfoRequest;
   }
 
   function openTelegram(url) {
@@ -85,14 +100,14 @@
     else window.open(url, "_blank", "noopener,noreferrer");
   }
   function botLink(payload) {
-    const name = state.profile?.bot_username;
+    const name = state.profile?.bot_username || appInfo?.bot_username;
     return name ? `https://t.me/${encodeURIComponent(name)}?start=${encodeURIComponent(payload)}` : "";
   }
 
   function theme() {
     const dark = tg?.colorScheme === "dark";
     document.documentElement.dataset.theme = dark ? "dark" : "light";
-    if (auth) {
+    if (tg && auth) {
       tg.setHeaderColor(dark ? "#151720" : "#f6f7fb");
       tg.setBackgroundColor(dark ? "#151720" : "#f6f7fb");
       if (tg.isVersionAtLeast("7.10")) tg.setBottomBarColor(dark ? "#20232e" : "#ffffff");
@@ -109,11 +124,11 @@
   const profileName = () => state.profile?.profile?.display_name || state.profile?.user?.first_name || tr("guest");
   const avatarContent = (url = avatarUrl) => url ? `<img src="${esc(url)}" alt="">` : esc(profileName()[0].toUpperCase());
 
-  function errorHtml() {
-    if (!state.error) return "";
+  function errorHtml(code = state.error) {
+    if (!code) return "";
     const channel = state.profile?.required_channel;
     const channelLink = channel?.startsWith("@") && /^@[A-Za-z0-9_]+$/.test(channel) ? `https://t.me/${channel.slice(1)}` : "";
-    return `<div class="error" role="alert">${esc(errorText(state.error))}${state.error === "subscription_required" && channelLink ? `<a href="${esc(channelLink)}" target="_blank" rel="noopener">${tr("joinChannel")}</a>` : ""}</div>`;
+    return `<div class="error" role="alert">${esc(errorText(code))}${code === "subscription_required" && channelLink ? `<a href="${esc(channelLink)}" target="_blank" rel="noopener">${tr("joinChannel")}</a>` : ""}${authErrors.has(code) ? `<p>${tr("loginRecovery")}${appInfo?.bot_username ? ` <strong>@${esc(appInfo.bot_username)}</strong>` : ""}</p>${botLink("webapp") ? `<button type="button" class="secondary" data-reopen-app>${icon("arrow")}${tr("reopenApp")}</button>` : ""}` : ""}</div>`;
   }
 
   function optionsHtml(opts, manual = false) {
@@ -159,7 +174,7 @@
     const row = (name, label, route) => `<button class="row-button" data-go="${route}"><span class="small-icon">${icon(name)}</span><span>${label}</span>${icon("chevron")}</button>`;
     return `<h1>${tr("profileTitle")}</h1><p class="intro">${tr("profileIntro")}</p>${errorHtml()}<section class="card"><div class="profile-hero"><span class="avatar">${avatarContent()}</span><div><h2>${esc(name)}</h2><span class="muted">${q?.premium_active ? tr("premium") : tr("free")}${p?.profile?.username ? ` · @${esc(p.profile.username)}` : ""}</span></div></div><button class="secondary" data-go="profile-edit">${icon("edit")}${tr("editProfile")}</button>
       <div class="quota"><div><strong>${files}</strong><small>${tr("filesLeft")}</small></div><div><strong>${topics}</strong><small>${tr("topicsLeft")}</small></div></div>${until ? `<p class="muted" style="margin:12px 0 0">${tr("expires")}: ${esc(new Date(until).toLocaleDateString(state.lang))}</p>` : ""}</section>
-      <section class="card" style="padding-block:4px">${row("bulb", tr("support"), "support")}${row("crown", tr("premium"), "premium")}${row("gift", tr("bonuses"), "bonuses")}${row("file", tr("myTests"), "quizzes")}</section>
+      <section class="card" style="padding-block:4px">${row("bulb", tr("support") + (p?.support?.unread ? ` (${p.support.unread})` : ""), "support")}${row("crown", tr("premium"), "premium")}${row("gift", tr("bonuses"), "bonuses")}${row("file", tr("myTests"), "quizzes")}${row("book", tr("myPublished"), "published")}${p?.is_admin ? row("team", tr("supportPanel") + (p.support?.admin_unread ? ` (${p.support.admin_unread})` : ""), "admin-support") : ""}</section>
       <section class="card">${cardHead("globe", tr("uiLanguage"))}<label class="field"><span>${tr("uiLanguage")}</span><select id="ui-language">${["uz", "ru", "en"].map(l => `<option value="${l}"${selected(state.lang, l)}>${langs[l]()}</option>`).join("")}</select></label></section>
       ${auth && !p ? `<button class="secondary" data-refresh>${icon("arrow")}${tr("retry")}</button>` : ""}`;
   }
@@ -199,34 +214,8 @@
       <div class="ref-link">${esc(botLink(`ref_${state.profile?.user.id}`) || tr("openTelegram"))}</div><button class="primary" data-copy>${icon("copy")}${tr("copy")}</button><button class="secondary" data-share>${icon("share")}${tr("share")}</button></section>`;
   }
 
-  function supportPage() {
-    return `${back()}<h1>${tr("support")}</h1><p class="intro">${tr("supportIntro")}</p><form id="support-form">${errorHtml()}
-      ${supportSent ? `<p class="result-count" role="status">${tr("supportSent")}</p>` : ""}
-      <section class="card"><label class="field"><span>${tr("supportMessage")}</span><textarea name="support_message" maxlength="3000" rows="6" required placeholder="${esc(tr("supportPlaceholder"))}" ${supportBusy ? "disabled" : ""}>${esc(supportDraft)}</textarea><small>${tr("supportHint")}</small></label>
-      <button type="submit" class="primary" ${supportBusy || !auth ? "disabled" : ""}>${icon("share")}${tr(supportBusy ? "loading" : "supportSend")}</button></section></form>`;
-  }
-
-  async function sendSupport() {
-    if (supportBusy) return;
-    if (!supportDraft.trim()) return toast(errorText("invalid_support_message"));
-    const version = state.routeVersion;
-    supportBusy = true; supportSent = false; state.error = null;
-    render();
-    try {
-      await api("support", { method: "POST", body: { message: supportDraft } });
-      supportDraft = ""; supportSent = true;
-      toast(tr("supportSent"));
-    } catch (error) {
-      if (state.routeVersion === version) state.error = error.code || "server_error";
-      toast(error.message);
-    } finally {
-      supportBusy = false;
-      if (state.route === "support") render();
-    }
-  }
-
   function quizzesPage() {
-    return `${back()}<h1>${tr("myTests")}</h1><p class="intro">${tr("secure")}</p>${errorHtml()}<section class="card">${state.quizzes.length ? state.quizzes.map(q => `<button class="quiz-row" data-quiz="${Number(q.id)}"><span class="small-icon">${icon(q.is_ai_generated ? "spark" : "file")}</span><span><strong>${esc(q.title)}</strong><small>${q.question_count} ${tr("questions")} · ${q.open_period} ${tr("seconds")}</small></span>${icon("chevron")}</button>`).join("") : `<div class="empty">${tr(auth ? "noTests" : "openTelegram")}</div>`}</section>${state.next ? `<button class="secondary" data-more>${tr("more")}</button>` : ""}`;
+    return `${back()}<h1>${tr("myTests")}</h1><p class="intro">${tr("secure")}</p>${errorHtml()}${state.error ? `<button class="secondary" data-reload-quizzes>${icon("arrow")}${tr("retry")}</button>` : `<section class="card">${state.quizzes.length ? state.quizzes.map(q => `<button class="quiz-row" data-quiz="${Number(q.id)}"><span class="small-icon">${icon(q.is_ai_generated ? "spark" : "file")}</span><span><strong>${esc(q.title)}</strong><small>${q.question_count} ${tr("questions")} · ${q.open_period} ${tr("seconds")}</small></span>${icon("chevron")}</button>`).join("") : `<div class="empty">${tr(auth ? "noTests" : "openTelegram")}</div>`}</section>${state.next ? `<button class="secondary" data-more>${tr("more")}</button>` : ""}`}`;
   }
 
   function resultPage() {
@@ -255,14 +244,15 @@
     else if (state.job) banner.innerHTML = `<button class="back" style="margin:0" data-go="working">${tr("working")} ${icon("chevron")}</button>`;
     else if (state.readyId) banner.innerHTML = `<button class="back" style="margin:0" data-quiz="${state.readyId}">${tr("ready")} ${icon("chevron")}</button>`;
     if (["file", "topic", "manual"].includes(state.route) && state.job && state.jobTab === state.route) main.innerHTML = workingPage();
-    else main.innerHTML = ({ file: filePage, topic: topicPage, manual: manualPage, profile: profilePage, "profile-edit": profileEditPage, premium: premiumPage, bonuses: bonusPage, support: supportPage, quizzes: quizzesPage, result: resultPage, working: workingPage, interactive: interactive.hubPage, "interactive-create": interactive.createPage, "interactive-room": interactive.roomPage })[state.route]?.() || filePage();
+    else main.innerHTML = ({ file: filePage, topic: topicPage, manual: manualPage, profile: profilePage, "profile-edit": profileEditPage, premium: premiumPage, bonuses: bonusPage, support: support.page, "admin-support": support.page, "admin-support-thread": support.page, published: interactive.ownPage, quizzes: quizzesPage, result: resultPage, working: workingPage, interactive: interactive.hubPage, "interactive-create": interactive.createPage, "interactive-room": interactive.roomPage })[state.route]?.() || filePage();
     if (auth && tg?.BackButton) {
-      if (["profile-edit", "premium", "bonuses", "support", "quizzes", "result", "working", "interactive-create", "interactive-room"].includes(state.route)) tg.BackButton.show(); else tg.BackButton.hide();
+      if (["profile-edit", "premium", "bonuses", "support", "quizzes", "result", "working", "interactive-create", "interactive-room", "published", "admin-support", "admin-support-thread"].includes(state.route)) tg.BackButton.show(); else tg.BackButton.hide();
     }
     bindFileDrop();
     if (state.route === "profile-edit" && avatarCropper.active) avatarCropper.bind(main.querySelector(".avatar-cropper"), state.busy || avatarLoading);
     if (state.route === "result" && state.quiz) loadImages(state.quiz.id);
     interactive.afterRender();
+    support.afterRender();
   }
 
   async function loadImages(quizId) {
@@ -281,12 +271,8 @@
   function capture() {
     const form = main.querySelector("form");
     if (!form) return;
-    if (interactive.capture(form)) return;
+    if (interactive.capture(form) || support.capture(form)) return;
     const data = new FormData(form);
-    if (form.id === "support-form") {
-      if (!supportBusy) supportDraft = String(data.get("support_message") || "");
-      return;
-    }
     if (form.id === "profile-form") {
       profileDraft = { display_name: String(data.get("display_name") || ""), username: String(data.get("profile_username") || "") };
       return;
@@ -304,16 +290,22 @@
   async function navigate(route) {
     capture();
     interactive.onNavigate(state.route, route);
+    support.onNavigate(state.route, route);
     if (state.route === "profile-edit" && route !== "profile-edit") clearProfileDraft();
     state.error = null;
     state.route = route;
     if (["file", "topic", "manual", "profile"].includes(route)) state.tab = route;
-    else if (["profile-edit", "premium", "bonuses", "support", "quizzes"].includes(route)) state.tab = "profile";
+    else if (["profile-edit", "premium", "bonuses", "support", "quizzes", "published", "admin-support", "admin-support-thread"].includes(route)) state.tab = "profile";
     else if (interactive.routes.includes(route)) state.tab = "interactive";
     const version = ++state.routeVersion;
     render();
     window.scrollTo({ top: 0, behavior: "instant" });
     if (interactive.routes.includes(route)) { await interactive.load(route); return; }
+    if (support.routes.includes(route)) { await support.load(route); return; }
+    if (route === "profile" && auth) {
+      try { await refreshProfile(); } catch (error) { if (state.routeVersion === version) state.error = error.code; }
+      if (state.routeVersion === version) render();
+    }
     if (route === "quizzes" && auth) {
       main.innerHTML = `<div class="card loading-card"><div class="spinner"></div><p>${tr("loading")}</p></div>`;
       try {
@@ -327,6 +319,7 @@
   async function showQuiz(id, captureDraft = true) {
     if (captureDraft) capture();
     interactive.onNavigate(state.route, "result");
+    support.onNavigate(state.route, "result");
     const version = ++state.routeVersion;
     state.route = "result"; state.error = null; state.quiz = null;
     main.innerHTML = `<div class="card loading-card"><div class="spinner"></div><p>${tr("loading")}</p></div>`;
@@ -359,6 +352,7 @@
   async function refreshProfile() {
     if (!auth) return;
     state.profile = await api("profile");
+    userKey = String(state.profile.user.id);
     await refreshAvatar();
     document.querySelector("#profile-shortcut").innerHTML = avatarContent();
   }
@@ -442,7 +436,7 @@
         render(); toast(errorText(state.error));
       }
     } catch (e) {
-      if (["unauthorized", "not_found"].includes(e.code)) {
+      if (authErrors.has(e.code) || e.code === "not_found") {
         storage.remove(`quiz-job:${userKey}`); state.job = null; state.error = e.code;
         if (state.route === "working") state.route = state.jobTab || "file";
         render();
@@ -492,9 +486,12 @@
     if (e.target.closest(".brand")) { e.preventDefault(); await navigate("file"); return; }
     const button = e.target.closest("button");
     if (!button || button.disabled) return;
+    if (support.handles(button)) { await support.handleClick(button); return; }
     if (interactive.handles(button)) { await interactive.handleClick(button); return; }
     if (button.dataset.go) { await navigate(button.dataset.go); return; }
     if (button.id === "profile-shortcut") { await navigate("profile"); return; }
+    if (button.hasAttribute("data-reopen-app")) { const link = botLink("webapp"); if (link) openTelegram(link); return; }
+    if (button.hasAttribute("data-reload-quizzes")) { await navigate("quizzes"); return; }
     if (button.hasAttribute("data-avatar-choose")) { document.querySelector("#avatar-input").click(); return; }
     if (button.hasAttribute("data-avatar-fit")) { avatarCropper.fit(); return; }
     if (button.hasAttribute("data-avatar-reset")) { avatarCropper.reset(); return; }
@@ -540,7 +537,7 @@
     if (!(form instanceof HTMLFormElement) || state.busy) return;
     capture();
     if (!auth) return toast(tr("openTelegram"));
-    if (form.id === "support-form") { await sendSupport(); return; }
+    if (form.id === "support-form") { await support.submit(form); return; }
     if (form.id === "interactive-create-form") { await interactive.submit(form); return; }
     if (form.id === "profile-form") { if (!avatarLoading) await saveProfile(); return; }
     if (form.id === "file-form" && !state.file) return toast(tr("selectFile"));
@@ -570,14 +567,15 @@
     finally { state.busy = false; render(); }
   });
 
-  const interactive = window.createInteractive({ api, tr, icon, esc, toast, storage, errorText, render, navigate, openTelegram,
+  const interactive = window.createInteractive({ api, tr, icon, esc, toast, storage, errorText, errorHtml, isAuthError: code => authErrors.has(code), render, navigate, openTelegram,
     route: () => state.route, profile: () => state.profile, authorized: () => !!auth, userKey: () => userKey, currentQuiz: () => state.quiz,
     fetchImage: async path => { const response = await fetch(`/api/${path}`, { headers: { Authorization: `tma ${auth}` } }); return response.ok ? response.blob() : null; }
   });
+  const support = window.createSupport({ api, tr, icon, esc, toast, errorText, errorHtml, render, navigate, isAuthError: code => authErrors.has(code), route: () => state.route, authorized: () => !!auth });
   window.addEventListener("hashchange", () => { if (["file", "topic", "manual", "profile", "interactive"].includes(location.hash.slice(1))) navigate(location.hash.slice(1)); });
   async function init() {
     theme();
-    if (tg && auth) { tg.ready(); tg.expand(); tg.onEvent("themeChanged", theme); tg.BackButton.onClick(() => navigate(interactive.routes.includes(state.route) ? "interactive" : "profile")); }
+    if (tg && auth) { tg.ready(); tg.expand(); tg.onEvent("themeChanged", theme); tg.BackButton.onClick(() => navigate(state.route === "admin-support-thread" ? "admin-support" : ["interactive-create", "interactive-room"].includes(state.route) ? "interactive" : "profile")); }
     const initial = location.hash.slice(1);
     if (["file", "topic", "manual", "profile", "interactive"].includes(initial)) { state.route = initial; state.tab = initial; }
     render();

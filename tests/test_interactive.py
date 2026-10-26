@@ -230,6 +230,73 @@ class InteractiveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parse_qs(url.query), {"mode": ["mini"], "room": [room_id]})
         self.assertEqual(url.fragment, "interactive")
 
+    async def test_private_quiz_is_link_only_and_only_author_can_start_rooms(self):
+        quiz_id = await self.publish(visibility="private")
+        room_id = await self.start(quiz_id)
+        for uid in (101, 202):
+            data = await self.request("GET", "", uid=uid)
+            self.assertNotIn(quiz_id, [q["id"] for q in data["quizzes"]])
+            self.assertNotIn(room_id, [r["id"] for r in data["rooms"]])
+        mine = await self.request("GET", "/quizzes/mine")
+        self.assertEqual(mine["quizzes"][0]["visibility"], "private")
+        self.assertNotIn("questions", mine["quizzes"][0])
+        self.assertEqual((await self.request("GET", "/quizzes/mine", uid=202))["quizzes"], [])
+        await self.request("POST", "/rooms", uid=202, data={"quiz_id": quiz_id}, status=404)
+        await self.request("GET", f"/rooms/{room_id}", uid=202, status=403)
+        await self.join(room_id, 202)
+        room = await self.request("GET", f"/rooms/{room_id}", uid=202)
+        self.assertEqual(room["visibility"], "private")
+        self.assertFalse(room["can_restart"])
+        self.assertEqual(len(room["question"]["options"]), 4)
+
+    async def test_only_author_can_remove_published_quiz_and_it_stops_all_rooms(self):
+        quiz_id = await self.publish()
+        room_id = await self.start(quiz_id, uid=202)
+        await self.request("DELETE", f"/quizzes/{quiz_id}", uid=202, status=404)
+        await self.request("DELETE", f"/quizzes/{quiz_id}")
+        self.assertEqual((await self.request("GET", "/quizzes/mine"))["quizzes"], [])
+        lobby = await self.request("GET", "", uid=202)
+        self.assertNotIn(quiz_id, [q["id"] for q in lobby["quizzes"]])
+        self.assertNotIn(room_id, [r["id"] for r in lobby["rooms"]])
+        room = await self.request("GET", f"/rooms/{room_id}", uid=202)
+        self.assertEqual((room["status"], room["reason"], room["can_restart"]), ("stopped", "deleted", False))
+        await self.answer(room_id, 202, 0, status=409)
+        await self.request("POST", f"/rooms/{room_id}/join", uid=303, status=404)
+        await self.request("POST", "/rooms", data={"quiz_id": quiz_id}, status=404)
+        await self.request("DELETE", f"/quizzes/{quiz_id}")  # Idempotent.
+
+    async def test_private_completions_never_leak_into_public_ranking(self):
+        quiz_id = await self.publish(count=1, visibility="private")
+        room_id = await self.start(quiz_id)
+        await self.join(room_id, 202)
+        await self.answer(room_id, 202, 0)
+        lobby = await self.request("GET", "")
+        self.assertEqual(lobby["leaderboard"], [])
+
+    async def test_removal_keeps_original_saved_bot_quiz(self):
+        response = await self.client.post("/api/quizzes/manual", json={"title": "Original", "questions": [support.QUESTION]}, headers=self.fixture.headers())
+        original = (await response.json())["quiz_id"]
+        published = await self.request("POST", "/quizzes", data={"source_quiz_id": original}, status=201)
+        await self.request("DELETE", "/quizzes/" + published["quiz_id"])
+        response = await self.client.get(f"/api/quizzes/{original}", headers=self.fixture.headers())
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())["title"], "Original")
+
+    async def test_published_list_pagination_and_legacy_public_defaults(self):
+        async with db.async_session() as session:
+            for n in range(21):
+                session.add(db.PublicQuiz(id=f"{1000 + n:032x}", author_id=101, title=f"Published {n}",
+                                          category="education", questions=json.dumps([question()]), created_at=n))
+            await session.commit()
+        first = await self.request("GET", "/quizzes/mine")
+        self.assertEqual(len(first["quizzes"]), 20)
+        self.assertTrue(all(q["visibility"] == "public" for q in first["quizzes"]))
+        second = await self.request("GET", f"/quizzes/mine?before={first['next']}")
+        self.assertEqual(len(second["quizzes"]), 1)
+        self.assertIsNone(second["next"])
+        self.assertEqual(len({q["id"] for q in first["quizzes"] + second["quizzes"]}), 21)
+        await self.request("GET", f"/quizzes/mine?before={first['next']}", uid=202, status=404)
+
 
 if __name__ == "__main__":
     unittest.main()

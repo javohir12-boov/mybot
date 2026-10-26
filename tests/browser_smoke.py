@@ -12,8 +12,10 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -21,6 +23,8 @@ from aiohttp import ClientSession
 from test_webapp import ApiTests, QUESTION, signed
 from services.interactive_api import SERVICE
 from services.support_service import SupportService
+from services import database as db
+from services.webapp import STATE
 
 
 async def run():
@@ -32,6 +36,8 @@ async def run():
     output.mkdir(parents=True, exist_ok=True)
     fixture = ApiTests("test_static_app_and_api_authentication")
     await fixture.asyncSetUp()
+    bot_quiz_id = await db.create_quiz(creator_id=101, title="Botda avval yaratilgan test")
+    await db.create_questions_bulk(bot_quiz_id, [QUESTION])
     browser = None
     exceptions = []
     try:
@@ -41,13 +47,20 @@ async def run():
                 str(chrome), "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-software-rasterizer", "--no-first-run", "--no-default-browser-check",
                 "--remote-debugging-port=0", f"--user-data-dir={profile}", "about:blank",
             ], stdout=subprocess.DEVNULL, stderr=browser_log, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            port = None
             try:
                 devtools = Path(profile) / "DevToolsActivePort"
                 for _ in range(150):
-                    if devtools.exists():
-                        break
+                    try:
+                        lines = devtools.read_text().splitlines()
+                        if lines and lines[0].isdigit():
+                            port = lines[0]
+                            break
+                    except OSError:
+                        pass  # Chrome may still hold the file while writing it on Windows.
                     await asyncio.sleep(0.1)
-                port = devtools.read_text().splitlines()[0]
+                if not port:
+                    raise AssertionError(f"Chrome did not open DevTools; see {output / 'chrome.log'}")
                 async with ClientSession() as session:
                     async with session.get(f"http://127.0.0.1:{port}/json/list") as response:
                         pages = await response.json()
@@ -178,12 +191,18 @@ async def run():
                             assert await evaluate("window.lastTelegramLink.endsWith('start=webpremium')")
                             await evaluate("document.querySelector('[data-go=profile]').click()")
                             await wait_for("!!document.querySelector('[data-go=support]')")
+                            await evaluate("document.querySelector('[data-go=quizzes]').click()")
+                            await wait_for("!!document.querySelector('[data-quiz=\"" + str(bot_quiz_id) + "\"]')")
+                            assert "Botda avval yaratilgan test" in await evaluate("document.querySelector('#main').textContent")
+                            await screenshot("quizzes-mobile.png", 390, 844)
+                            await evaluate("document.querySelector('[data-go=profile]').click()")
                             await evaluate("document.querySelector('[data-go=support]').click()")
                             await wait_for("!!document.querySelector('#support-form')")
                             fixture.bot.send_message = AsyncMock()
                             with patch("services.support_service.ADMIN_IDS", [999]), patch("services.webapp.support_service", SupportService()):
                                 await evaluate("document.querySelector('[name=support_message]').value='Browser support test';document.querySelector('#support-form').requestSubmit()")
-                                await wait_for("!!document.querySelector('#support-form [role=status]')")
+                                await wait_for("!!document.querySelector('.result-count[role=status]')")
+                                assert "Browser support test" in await evaluate("document.querySelector('#support-messages').textContent")
                                 fixture.bot.send_message.assert_awaited_once()
                                 assert "Browser support test" in fixture.bot.send_message.await_args.args[1]
                             await screenshot("support-mobile.png", 390, 844)
@@ -247,14 +266,105 @@ async def run():
                             await service.advance()
                             await wait_for("document.querySelector('.live-result h2')?.textContent==='Xona to‘xtadi'")
                             await screenshot("interactive-stopped-mobile.png", 390, 844)
+                            fixture.app[STATE]["rates"].clear()
+                            await evaluate("document.querySelector('[data-go=profile]').click()")
+                            await wait_for("!!document.querySelector('[data-go=published]')")
+                            await evaluate("document.querySelector('[data-go=published]').click()")
+                            await wait_for("!!document.querySelector('[data-live-delete]')")
+                            await screenshot("published-mobile.png", 390, 844)
+                            await evaluate("document.querySelector('[data-go=interactive-create]').click()")
+                            await wait_for("!!document.querySelector('[name=live_visibility]')")
+                            await evaluate("document.querySelector('[name=live_title]').value='Private invitation quiz';document.querySelector('[name=live_question]').value='Choose one';document.querySelectorAll('[name=live_option]').forEach((e,i)=>e.value=['One','Two','Three','Four'][i]);document.querySelector('[name=live_visibility]').value='private';document.querySelector('#interactive-create-form').dispatchEvent(new Event('input',{bubbles:true}))")
+                            await screenshot("private-publish-mobile.png", 390, 844)
+                            await evaluate("document.querySelector('#interactive-create-form').requestSubmit()")
+                            await wait_for("document.querySelectorAll('[data-live-answer]').length===4")
+                            private_room = await evaluate("new URLSearchParams(location.search).get('room')")
+                            response = await fixture.client.post(f"/api/interactive/rooms/{private_room}/join", headers=fixture.headers(202))
+                            assert response.status == 200
+                            response = await fixture.client.get(f"/api/interactive/rooms/{private_room}", headers=fixture.headers(202))
+                            private_quiz = (await response.json())["quiz_id"]
+                            response = await fixture.client.get("/api/interactive", headers=fixture.headers(202))
+                            catalogue = await response.json()
+                            assert private_quiz not in [q['id'] for q in catalogue['quizzes']]
+                            assert private_room not in [r['id'] for r in catalogue['rooms']]
+                            await evaluate("document.querySelector('[data-go=profile]').click()")
+                            await evaluate("document.querySelector('[data-go=published]').click()")
+                            await wait_for("!!document.querySelector('[data-live-delete=\"" + private_quiz + "\"]')")
+                            await evaluate("document.querySelector('[data-live-delete=\"" + private_quiz + "\"]').click()")
+                            await wait_for("!!document.querySelector('[data-live-delete-confirm]')")
+                            await screenshot("published-remove-mobile.png", 390, 844)
+                            await evaluate("document.querySelector('[data-live-delete-confirm]').click()")
+                            await wait_for("!document.querySelector('[data-live-delete=\"" + private_quiz + "\"]')")
+                            response = await fixture.client.get(f"/api/interactive/rooms/{private_room}", headers=fixture.headers(202))
+                            assert (await response.json())["reason"] == "deleted"
+                            with patch("services.support_inbox.ADMIN_IDS", [999]):
+                                await evaluate("window.Telegram.WebApp.initData=" + json.dumps(signed(999)) + ";document.querySelector('[data-go=profile]').click()")
+                                await wait_for("!!document.querySelector('[data-go=admin-support]')")
+                                await evaluate("document.querySelector('[data-go=admin-support]').click()")
+                                await wait_for("!!document.querySelector('[data-support-thread=\"101\"]')")
+                                await screenshot("admin-inbox-mobile.png", 390, 844)
+                                await evaluate("document.querySelector('[data-support-thread=\"101\"]').click()")
+                                await wait_for("!!document.querySelector('#support-messages .support-bubble')")
+                                await evaluate("document.querySelector('[name=support_message]').value='Administrator web reply';document.querySelector('#support-form').requestSubmit()")
+                                await wait_for("document.querySelector('#support-messages')?.textContent.includes('Administrator web reply')")
+                                await evaluate("window.Telegram.WebApp.initData=" + json.dumps(signed()) + ";document.querySelector('[data-go=profile]').click()")
+                                await wait_for("document.querySelector('[data-go=support]')?.textContent.includes('(1)')")
+                                assert not await evaluate("!!document.querySelector('[data-go=admin-support]')")
+                                await evaluate("document.querySelector('[data-go=support]').click()")
+                                await wait_for("document.querySelector('#support-messages')?.textContent.includes('Administrator web reply')")
+                                await evaluate("document.querySelector('[name=support_message]').value='Unsent draft stays here'")
+                                response = await fixture.client.post("/api/admin/support/101/messages", json={"message": "Second web reply"}, headers=fixture.headers(999))
+                                assert response.status == 200
+                                await wait_for("document.querySelector('#support-messages')?.textContent.includes('Second web reply')")
+                                assert await evaluate("document.querySelector('[name=support_message]').value==='Unsent draft stays here'")
+                                await screenshot("support-conversation-mobile.png", 390, 844)
                             await evaluate("document.querySelector('[data-go=file]').click(); document.documentElement.dataset.theme='dark'")
                             await screenshot("file-dark.png", 390, 844)
                             await evaluate("document.documentElement.dataset.theme='light'")
                             await screenshot("file-desktop.png", 1100, 950)
+                            expired = signed(timestamp=int(time.time()) - 100000)
+                            await evaluate("window.Telegram.WebApp.initData=" + json.dumps(expired) + ";document.querySelector('[data-go=profile]').click()")
+                            await evaluate("document.querySelector('[data-go=quizzes]').click()")
+                            await wait_for("!!document.querySelector('[data-reopen-app]')")
+                            assert "Sessiya muddati tugadi" in await evaluate("document.querySelector('.error').textContent")
+                            assert not await evaluate("!!document.querySelector('.empty')"), "An auth failure must not claim that quizzes are empty"
+                            await evaluate("document.querySelector('[data-reopen-app]').click()")
+                            assert await evaluate("window.lastTelegramLink.endsWith('start=webapp')")
+                            await screenshot("session-recovery-mobile.png", 390, 844)
+                            await evaluate("window.Telegram.WebApp.initData=" + json.dumps(signed()) + ";document.querySelector('[data-reload-quizzes]').click()")
+                            await wait_for("!!document.querySelector('[data-quiz=\"" + str(bot_quiz_id) + "\"]')")
+                            wrong = signed(token="987654321:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+                            await evaluate("window.Telegram.WebApp.initData=" + json.dumps(wrong) + ";document.querySelector('[data-go=profile]').click()")
+                            await evaluate("document.querySelector('[data-go=quizzes]').click()")
+                            await wait_for("!!document.querySelector('[data-reopen-app]')")
+                            assert "Telegram kirishini tasdiqlab bo‘lmadi" in await evaluate("document.querySelector('.error').textContent")
+                            assert "Sessiya muddati tugadi" not in await evaluate("document.querySelector('.error').textContent")
+                            await cdp("Page.addScriptToEvaluateOnNewDocument", {"source": "window.Telegram=undefined;"})
+                            await cdp("Page.navigate", {"url": url + '#' + urlencode({"tgWebAppData": signed()})})
+                            await cdp("Page.reload", {"ignoreCache": True})
+                            await wait_for("typeof window.Telegram === 'undefined' && document.querySelector('#connection')?.hidden")
+                            await evaluate("document.querySelector('[data-go=profile]').click()")
+                            await wait_for("!!document.querySelector('[data-go=support]')")
+                            await evaluate("document.querySelector('[data-go=quizzes]').click()")
+                            await wait_for("!!document.querySelector('[data-quiz=\"" + str(bot_quiz_id) + "\"]')")
                             assert not exceptions, exceptions
-                            print(json.dumps({"status": "passed", "screenshots": str(output), "checks": ["5 footer tabs", "320px and 390px layouts", "AI topic to saved result", "Telegram quiz link", "manual quiz and draft cleanup", "profile editing", "portrait crop selection and saved pixels", "fit entire long photo", "avatar upload and reload", "PNG JPEG WebP avatars", "profile help and admin delivery", "language change", "premium plans and link", "referral link", "interactive categories", "weighted test publishing", "host-independent shared room", "affinity percentage", "creator ranking", "3 unanswered question stop", "dark theme", "desktop", "no JS exceptions"]}), flush=True)
+                            print(json.dumps({"status": "passed", "screenshots": str(output), "checks": ["5 footer tabs", "320px and 390px layouts", "AI topic to saved result", "Telegram quiz link", "manual quiz and draft cleanup", "profile editing", "portrait crop selection and saved pixels", "fit entire long photo", "avatar upload and reload", "PNG JPEG WebP avatars", "profile help and admin delivery", "private publishing and invite-only room", "author-only removal and room stop", "published quizzes in profile", "web admin inbox and replies", "unread reply count", "incoming replies preserve draft", "language change", "premium plans and link", "referral link", "interactive categories", "weighted test publishing", "host-independent shared room", "affinity percentage", "creator ranking", "3 unanswered question stop", "dark theme", "desktop", "no JS exceptions"]}), flush=True)
             finally:
-                browser.terminate()
+                if port and browser.poll() is None:
+                    try:
+                        async with ClientSession() as cleanup_session:
+                            async with cleanup_session.get(f"http://127.0.0.1:{port}/json/version", timeout=3) as response:
+                                metadata = await response.json()
+                            async with cleanup_session.ws_connect(metadata["webSocketDebuggerUrl"]) as cleanup_ws:
+                                await cleanup_ws.send_json({"id": 1, "method": "Browser.close"})
+                            for _ in range(30):
+                                if browser.poll() is not None:
+                                    break
+                                await asyncio.sleep(.1)
+                    except Exception:
+                        pass
+                if browser.poll() is None:
+                    browser.terminate()
                 try:
                     browser.wait(timeout=10)
                 except subprocess.TimeoutExpired:

@@ -27,6 +27,7 @@ async def open_shared_room(message: types.Message, command: CommandObject) -> No
     ]]))
 
 
+@router.message(CommandStart(deep_link=True), F.text.regexp(r"^/start(?:@\w+)?\s+webapp$"))
 @router.message(Command("app"))
 async def open_app(message: types.Message) -> None:
     if message.chat.type != "private":

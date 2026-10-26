@@ -34,12 +34,12 @@ from services.support_service import SupportService
 QUESTION = {"question": "2 + 2 = ?", "options": ["1", "2", "3", "4"], "correct_index": 3, "explanation": "2 + 2 = 4"}
 
 
-def signed(user_id=101, *, timestamp=None, fields=None):
+def signed(user_id=101, *, timestamp=None, fields=None, token=BOT_TOKEN):
     data = fields or {"auth_date": str(int(time.time()) if timestamp is None else timestamp),
                       "user": json.dumps({"id": user_id, "first_name": "O‘quvchi", "username": "test_user"}, ensure_ascii=False),
                       "query_id": "test-query"}
     check = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
-    secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+    secret = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
     signature = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
     return urlencode({**data, "hash": signature})
 
@@ -63,6 +63,17 @@ class AuthTests(unittest.TestCase):
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        # A file gives concurrent HTTP requests separate SQLite connections.
+        # StaticPool's single in-memory connection lets one session roll back
+        # another session's uncommitted support message during live polling.
+        self.database_temp = tempfile.TemporaryDirectory()
+        database_url = "sqlite+aiosqlite:///" + (Path(self.database_temp.name) / "test.db").as_posix()
+        with patch.object(db, "DATABASE_URL", database_url):
+            self.test_engine = db._build_engine()
+        self.engine_patch = patch.object(db, "engine", self.test_engine)
+        self.session_patch = patch.object(db, "async_session", db.sessionmaker(self.test_engine, class_=db.AsyncSession, expire_on_commit=False))
+        self.engine_patch.start()
+        self.session_patch.start()
         self.avatar_temp = tempfile.TemporaryDirectory()
         self.avatar_patch = patch("services.webapp.AVATARS", Path(self.avatar_temp.name))
         self.avatar_patch.start()
@@ -83,6 +94,9 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.client.close()
         await db.engine.dispose()
+        self.session_patch.stop()
+        self.engine_patch.stop()
+        self.database_temp.cleanup()
         self.avatar_patch.stop()
         self.avatar_temp.cleanup()
 
@@ -121,6 +135,43 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("30d", profile["plans"])
         self.assertEqual(profile["bot_username"], "test_quiz_bot")
 
+    async def test_public_reopen_info_never_exposes_private_profile(self):
+        response = await self.client.get("/app/config.json")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(await response.json(), {"name": "Create Quiz", "bot_username": "test_quiz_bot"})
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        for path in ("/api/profile", "/api/quizzes", "/api/support"):
+            response = await self.client.get(path) if path != "/api/support" else await self.client.post(path, json={"message": "Hello"})
+            self.assertEqual(response.status, 401)
+
+    async def test_auth_failure_reports_actual_reason_without_returning_an_empty_list(self):
+        cases = [(signed(timestamp=int(time.time()) - 100000), "session_expired"),
+                 (signed(token="987654321:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"), "invalid_signature"),
+                 ("invalid-data", "invalid_init_data")]
+        for raw, reason in cases:
+            response = await self.client.get("/api/quizzes", headers={"Authorization": f"tma {raw}"})
+            self.assertEqual(response.status, 401)
+            self.assertEqual(await response.json(), {"error": "unauthorized", "reason": reason})
+
+    async def test_auth_uses_serving_bot_token(self):
+        self.bot.token = "987654321:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+        response = await self.client.get("/api/profile", headers=self.headers())
+        self.assertEqual(response.status, 401)
+        response = await self.client.get("/api/profile", headers={"Authorization": f"tma {signed(token=self.bot.token)}"})
+        self.assertEqual(response.status, 200)
+        self.assertEqual((await response.json())["user"]["id"], 101)
+
+    async def test_bot_created_quiz_is_visible_in_web_and_remains_owner_only(self):
+        # The bot's existing save path, rather than creating through the web API.
+        quiz_id = await db.create_quiz(creator_id=101, title="Existing bot quiz")
+        await db.create_questions_bulk(quiz_id, [QUESTION])
+        response = await self.client.get("/api/quizzes", headers=self.headers())
+        self.assertEqual(response.status, 200)
+        rows = (await response.json())["quizzes"]
+        self.assertEqual([(q["id"], q["title"], q["question_count"]) for q in rows], [(quiz_id, "Existing bot quiz", 1)])
+        response = await self.client.get("/api/quizzes", headers=self.headers(202))
+        self.assertEqual((await response.json())["quizzes"], [])
+
     async def test_support_requires_auth_and_uses_signed_identity(self):
         self.bot.send_message = AsyncMock()
         with patch("services.webapp.support_service", SupportService()), patch("services.support_service.ADMIN_IDS", [999]):
@@ -140,7 +191,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await response.json())["error"], "support_rate_limit")
             self.bot.send_message.assert_awaited_once()
 
-    async def test_support_validation_and_delivery_failure_allow_retry(self):
+    async def test_support_validation_and_web_inbox_survives_notification_failure(self):
         self.bot.send_message = AsyncMock(side_effect=RuntimeError("unavailable"))
         with patch("services.webapp.support_service", SupportService()), patch("services.support_service.ADMIN_IDS", [999]):
             for message in (None, "", "  ", "x" * 3001, 123, {"text": "Help"}):
@@ -148,11 +199,12 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status, 400)
             self.bot.send_message.assert_not_awaited()
             response = await self.client.post("/api/support", json={"message": "Help"}, headers=self.headers())
-            self.assertEqual(response.status, 503)
-            self.assertEqual((await response.json())["error"], "support_unavailable")
+            self.assertEqual(response.status, 200)
+            history = await self.client.get("/api/support/messages", headers=self.headers())
+            self.assertEqual((await history.json())["messages"][0]["body"], "Help")
             self.bot.send_message.side_effect = None
             response = await self.client.post("/api/support", json={"message": "Help"}, headers=self.headers())
-            self.assertEqual(response.status, 200)
+            self.assertEqual(response.status, 429)
 
     async def test_language_saved_to_existing_user_settings(self):
         response = await self.client.patch("/api/settings", json={"ui_lang": "en"}, headers=self.headers())

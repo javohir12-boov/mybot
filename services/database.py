@@ -192,6 +192,32 @@ class PublicQuiz(Base):
     created_at = Column(Float, nullable=False)
 
 
+class PublicQuizSettings(Base):
+    __tablename__ = "public_quiz_settings"
+    quiz_id = Column(Text, ForeignKey("public_quizzes.id"), primary_key=True)
+    visibility = Column(Text, nullable=False, default="public")
+    deleted_at = Column(Float, nullable=True)
+
+
+class SupportThread(Base):
+    __tablename__ = "support_threads"
+    user_id = Column(BigInteger, ForeignKey("users.id"), primary_key=True)
+    last_message_id = Column(Integer, nullable=False, default=0, index=True)
+    last_user_at = Column(Float, nullable=False, default=0)
+    user_read_id = Column(Integer, nullable=False, default=0)
+    admin_read_id = Column(Integer, nullable=False, default=0)
+
+
+class SupportMessage(Base):
+    __tablename__ = "support_messages"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, ForeignKey("support_threads.user_id"), nullable=False, index=True)
+    sender_id = Column(BigInteger, nullable=False)
+    from_admin = Column(Boolean, nullable=False, default=False)
+    body = Column(Text, nullable=False)
+    created_at = Column(Float, nullable=False)
+
+
 class InteractiveRoom(Base):
     __tablename__ = "interactive_rooms"
     id = Column(Text, primary_key=True)

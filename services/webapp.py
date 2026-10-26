@@ -35,12 +35,13 @@ USER = "telegram_user"
 
 
 class AppError(Exception):
-    def __init__(self, code, status=400):
-        self.code, self.status = code, status
+    def __init__(self, code, status=400, *, reason=None):
+        self.code, self.status, self.reason = code, status, reason
 
 
 def validate_init_data(raw, token=BOT_TOKEN, *, now=None, max_age=WEBAPP_AUTH_MAX_AGE):
     """Validate Telegram's HMAC and timestamp before trusting the user payload."""
+    reason = "invalid_init_data"
     try:
         pairs = parse_qsl(raw, keep_blank_values=True, strict_parsing=True, max_num_fields=30)
         fields = dict(pairs)
@@ -51,16 +52,18 @@ def validate_init_data(raw, token=BOT_TOKEN, *, now=None, max_age=WEBAPP_AUTH_MA
         secret = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
         expected = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, received):
+            reason = "invalid_signature"
             raise ValueError("Invalid signature")
         age = (time.time() if now is None else now) - int(fields["auth_date"])
         if age < -30 or age > max_age:
+            reason = "session_expired" if age > max_age else "session_clock"
             raise ValueError("Expired session")
         user = json.loads(fields["user"])
         if not isinstance(user, dict) or type(user.get("id")) is not int or user["id"] <= 0:
             raise ValueError("Invalid user")
         return user
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
-        raise AppError("unauthorized", 401) from exc
+        raise AppError("unauthorized", 401, reason=reason) from exc
 
 
 @web.middleware
@@ -73,9 +76,12 @@ async def api_middleware(request, handler):
     try:
         header = request.headers.get("Authorization", "")
         if not header.startswith("tma "):
-            raise AppError("unauthorized", 401)
-        request[USER] = validate_init_data(header[4:])
+            raise AppError("unauthorized", 401, reason="telegram_required")
         state = request.app[STATE]
+        # Authenticate against the bot serving this app, including when it is
+        # constructed with a token supplied outside the config module.
+        token = getattr(state["bot"], "token", BOT_TOKEN)
+        request[USER] = validate_init_data(header[4:], token=token)
         now = time.monotonic()
         # Expire inactive rate buckets; repeated sessions must not grow memory forever.
         if len(state["rates"]) > 2000:
@@ -90,7 +96,12 @@ async def api_middleware(request, handler):
         hits.append(now)
         response = await handler(request)
     except AppError as exc:
-        response = web.json_response({"error": exc.code}, status=exc.status)
+        payload = {"error": exc.code}
+        if exc.reason:
+            payload["reason"] = exc.reason
+            # Never log initData, signatures, tokens or the Authorization header.
+            logging.warning("Mini App authentication rejected: reason=%s path=%s", exc.reason, request.path)
+        response = web.json_response(payload, status=exc.status)
     except SupportError as exc:
         response = web.json_response({"error": exc.code}, status=exc.status)
     except ProfileError as exc:
@@ -188,6 +199,7 @@ async def check_subscription(request):
 
 
 async def profile(request):
+    from services.support_inbox import inbox, is_admin
     user = request[USER]
     await ensure_user(user)
     # Settings may be inserted on first access. Finish that transaction before
@@ -196,6 +208,7 @@ async def profile(request):
     quota = await db.get_user_quota_status(user["id"])
     referral = await db.get_referral_status(user["id"])
     saved_profile = await public_profile(user)
+    support_status = await inbox.summary(user["id"])
     state = request.app[STATE]
     if not state["username"]:
         state["username"] = (await state["bot"].get_me()).username
@@ -204,7 +217,21 @@ async def profile(request):
 
     return web.json_response({"user": user, "profile": saved_profile, "settings": user_settings, "quota": quota, "referral": referral,
                               "bot_username": state["username"], "plans": _PREMIUM_PLANS, "ai_enabled": AI_ENABLED,
-                              "required_channel": REQUIRED_CHANNEL if REQUIRED_CHANNEL_ENABLED else ""})
+                              "required_channel": REQUIRED_CHANNEL if REQUIRED_CHANNEL_ENABLED else "",
+                              "is_admin": is_admin(user["id"]), "support": support_status})
+
+
+async def app_info(request):
+    """Public bot identity for reopening a Mini App whose login was rejected."""
+    state = request.app[STATE]
+    if not state["username"]:
+        try:
+            state["username"] = (await asyncio.wait_for(state["bot"].get_me(), timeout=5)).username
+        except Exception:
+            logging.warning("Mini App bot identity unavailable")
+            return web.json_response({"error": "server_error"}, status=503, headers={"Cache-Control": "no-store"})
+    return web.json_response({"name": "Create Quiz", "bot_username": state["username"]},
+                             headers={"Cache-Control": "no-store"})
 
 
 async def public_profile(user):
@@ -274,7 +301,8 @@ async def delete_avatar(request):
 
 async def send_support(request):
     data = await read_json(request)
-    await support_service.send(request.app[STATE]["bot"], request[USER], data.get("message"), source="web")
+    await ensure_user(request[USER])
+    await support_service.send(request.app[STATE]["bot"], request[USER], data.get("message"), source="web", persist=True)
     return web.json_response({"ok": True})
 
 
@@ -578,8 +606,10 @@ async def stop_jobs(app):
 
 def setup_webapp(app, bot):
     from services.interactive_api import setup_interactive
+    from services.support_api import setup_support
 
     setup_interactive(app)
+    setup_support(app)
     app[STATE] = {"bot": bot, "username": "", "jobs": {}, "tasks": set(), "rates": defaultdict(deque), "semaphore": asyncio.Semaphore(4), "profile_lock": asyncio.Lock()}
     app.middlewares.append(api_middleware)
 
@@ -588,6 +618,7 @@ def setup_webapp(app, bot):
 
     app.router.add_get("/app", index)
     app.router.add_get("/app/", index)
+    app.router.add_get("/app/config.json", app_info)
     app.router.add_static("/app/assets/", STATIC / "assets", show_index=False)
     app.router.add_get("/api/profile", profile)
     app.router.add_patch("/api/profile", edit_profile)

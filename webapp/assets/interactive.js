@@ -3,12 +3,13 @@ window.createInteractive = function (ctx) {
   const { api, tr, icon, esc, toast } = ctx;
   const categories = [["education", "book"], ["love", "heart"], ["friendship", "team"], ["interests", "spark"], ["other", "globe"]];
   const subjects = ["general", "math", "history", "science", "languages", "technology"];
-  const routes = ["interactive", "interactive-create", "interactive-room"];
+  const routes = ["interactive", "interactive-create", "interactive-room", "published"];
   const blank = () => ({ question: "", options: ["", "", "", ""], correct_index: 0, weights: [0, 30, 70, 100] });
   const ui = { category: "education", subject: "all", tab: "quizzes", lobby: null, draft: null, saved: [], source: "new", sourceId: "", roomId: "", room: null, error: "", busy: false, answering: false, epoch: 0 };
   let refreshTimer, clockTimer, imageUrl = "";
+  ui.own = null; ui.ownNext = null; ui.confirmDelete = ""; ui.removing = false;
   const selected = (a, b) => String(a) === String(b) ? " selected" : "";
-  const errorHtml = () => ui.error ? `<div class="error" role="alert">${esc(ctx.errorText(ui.error))}</div>` : "";
+  const errorHtml = () => ctx.errorHtml(ui.error);
   const person = p => `<span class="live-person-avatar">${esc((p.name || "Q")[0].toUpperCase())}</span>`;
   const kindLabel = kind => tr(kind === "affinity" ? "liveKindAffinity" : "liveKindKnowledge");
   const back = () => `<button class="back" data-go="interactive">${icon("back")}${tr("liveBack")}</button>`;
@@ -39,9 +40,15 @@ window.createInteractive = function (ctx) {
     if (!ui.draft) {
       const saved = ctx.storage.get(`interactive-draft:${ctx.userKey()}`);
       const valid = saved && Array.isArray(saved.questions) && saved.questions.length > 0 && saved.questions.length <= 50 && saved.questions.every(q => typeof q.question === "string" && Array.isArray(q.options) && q.options.length === 4 && Array.isArray(q.weights) && q.weights.length === 4);
-      ui.draft = valid ? saved : { title: "", category: ui.category, subject: ui.subject === "all" ? "general" : ui.subject, kind: ["love", "friendship", "interests"].includes(ui.category) ? "affinity" : "knowledge", open_period: 30, questions: [blank()] };
+      ui.draft = valid ? saved : { title: "", category: ui.category, subject: ui.subject === "all" ? "general" : ui.subject, kind: ["love", "friendship", "interests"].includes(ui.category) ? "affinity" : "knowledge", open_period: 30, visibility: "public", questions: [blank()] };
     }
     return ui.draft;
+  }
+
+  function ownPage() {
+    return `<button class="back" data-go="profile">${icon("back")}${tr("back")}</button><h1>${tr("myPublished")}</h1><p class="intro">${tr("myPublishedHint")}</p>${errorHtml()}
+      ${ui.own === null ? `<p class="empty">${tr(ctx.authorized() ? "loading" : "openTelegram")}</p>` : ui.own.length ? ui.own.map(q => `<article class="card"><span class="tag">${tr(q.visibility === "private" ? "visibilityPrivate" : "visibilityPublic")}</span><h2 class="published-title">${esc(q.title)}</h2><p class="muted">${q.question_count} ${tr("questions")}</p>${(q.rooms || []).map(room => `<button class="secondary" data-live-room="${esc(room.id)}">${icon("team")}${tr("liveReturnRoom")}</button>`).join("")}<div class="split-actions"><button class="secondary" data-live-start="${esc(q.id)}">${icon("team")}${tr("startTogether")}</button><button class="secondary danger" data-live-delete="${esc(q.id)}" ${ui.removing ? "disabled" : ""}>${icon("trash")}${tr("removePublished")}</button></div>${ui.confirmDelete === q.id ? `<div class="delete-confirm"><p>${tr("removePublishedConfirm")}</p><div class="split-actions"><button class="primary danger" data-live-delete-confirm="${esc(q.id)}" ${ui.removing ? "disabled" : ""}>${tr("removePublished")}</button><button class="secondary" data-live-delete-cancel ${ui.removing ? "disabled" : ""}>${tr("cancel")}</button></div></div>` : ""}</article>`).join("") : `<section class="card empty">${tr("noPublished")}</section>`}
+      ${ui.ownNext ? `<button class="secondary" data-live-own-more>${tr("more")}</button>` : ""}<button class="secondary" data-go="interactive-create">${icon("plus")}${tr("addPublicTest")}</button>`;
   }
 
   function createPage() {
@@ -49,9 +56,9 @@ window.createInteractive = function (ctx) {
     return `${back()}<h1>${tr("liveNewTitle")}</h1><p class="intro">${tr("liveNewIntro")}</p><form id="interactive-create-form">${errorHtml()}
       <div class="live-source-switch"><button type="button" class="${ui.source === "new" ? "selected" : ""}" data-live-source="new">${tr("liveNewSource")}</button><button type="button" class="${ui.source === "saved" ? "selected" : ""}" data-live-source="saved">${tr("liveSavedSource")}</button></div>
       ${ui.source === "saved" ? `<section class="card"><label class="field"><span>${tr("liveChooseSaved")}</span><select id="live-saved-quiz" required><option value="">${tr("liveChooseSaved")}</option>${ui.saved.filter(q => q.question_count > 0 && q.question_count <= 50).map(q => `<option value="${q.id}"${selected(ui.sourceId, q.id)}>${esc(q.title)} · ${q.question_count}</option>`).join("")}</select><small>${tr("liveSavedHint")}</small></label></section>` : ""}
-      <section class="card"><label class="field"><span>${tr("testTitle")}</span><input name="live_title" type="text" required minlength="3" maxlength="120" value="${esc(draft.title)}" placeholder="${tr("titlePlaceholder")}"></label><div class="grid-two"><label class="field"><span>${tr("liveCategory")}</span><select name="live_category">${categories.map(([c]) => `<option value="${c}"${selected(draft.category, c)}>${tr(c)}</option>`).join("")}</select></label><label class="field"><span>${tr("liveKind")}</span><select name="live_kind" ${ui.source === "saved" ? "disabled" : ""}><option value="knowledge"${selected(draft.kind, "knowledge")}>${tr("liveKindKnowledge")}</option><option value="affinity"${selected(draft.kind, "affinity")}>${tr("liveKindAffinity")}</option></select></label>${draft.category === "education" ? `<label class="field"><span>${tr("liveSubject")}</span><select name="live_subject">${subjects.map(s => `<option value="${s}"${selected(draft.subject, s)}>${tr(s)}</option>`).join("")}</select></label>` : ""}<label class="field"><span>${tr("time")}</span><select name="live_period">${[10, 15, 20, 30, 45, 60, 90, 120].map(n => `<option value="${n}"${selected(draft.open_period, n)}>${n} ${tr("seconds")}</option>`).join("")}</select></label></div></section>
+      <section class="card"><label class="field"><span>${tr("testTitle")}</span><input name="live_title" type="text" required minlength="3" maxlength="120" value="${esc(draft.title)}" placeholder="${tr("titlePlaceholder")}"></label><label class="field"><span>${tr("visibility")}</span><select name="live_visibility"><option value="public"${selected(draft.visibility || "public", "public")}>${tr("visibilityPublic")}</option><option value="private"${selected(draft.visibility, "private")}>${tr("visibilityPrivate")}</option></select><small>${tr("visibilityHint")}</small></label><div class="grid-two"><label class="field"><span>${tr("liveCategory")}</span><select name="live_category">${categories.map(([c]) => `<option value="${c}"${selected(draft.category, c)}>${tr(c)}</option>`).join("")}</select></label><label class="field"><span>${tr("liveKind")}</span><select name="live_kind" ${ui.source === "saved" ? "disabled" : ""}><option value="knowledge"${selected(draft.kind, "knowledge")}>${tr("liveKindKnowledge")}</option><option value="affinity"${selected(draft.kind, "affinity")}>${tr("liveKindAffinity")}</option></select></label>${draft.category === "education" ? `<label class="field"><span>${tr("liveSubject")}</span><select name="live_subject">${subjects.map(s => `<option value="${s}"${selected(draft.subject, s)}>${tr(s)}</option>`).join("")}</select></label>` : ""}<label class="field"><span>${tr("time")}</span><select name="live_period">${[10, 15, 20, 30, 45, 60, 90, 120].map(n => `<option value="${n}"${selected(draft.open_period, n)}>${n} ${tr("seconds")}</option>`).join("")}</select></label></div></section>
       ${ui.source === "new" ? `${affinity ? `<aside class="tip live-weight-tip">${icon("heart")}<p>${tr("liveWeightsHint")}</p></aside>` : ""}${draft.questions.map((q, n) => questionEditor(q, n, affinity)).join("")}<button class="secondary" type="button" data-live-add-question ${draft.questions.length >= 50 ? "disabled" : ""}>${icon("plus")}${tr("addQuestion")}</button><p class="under-button">${tr("liveDraftHint")}</p>` : ""}
-      <button class="primary" type="submit" ${ui.busy ? "disabled" : ""}>${icon("share")}${tr(ui.busy ? "loading" : "livePublish")}</button><p class="under-button">${tr("livePublicNote")}</p></form>`;
+      <button class="primary" type="submit" ${ui.busy ? "disabled" : ""}>${icon("share")}${tr(ui.busy ? "loading" : "livePublish")}</button><p class="under-button">${tr("visibilityHint")}</p></form>`;
   }
 
   function questionEditor(q, n, affinity) {
@@ -61,6 +68,7 @@ window.createInteractive = function (ctx) {
   function capture(form) {
     if (form.id !== "interactive-create-form") return false;
     const draft = getDraft(), data = new FormData(form);
+    draft.visibility = String(data.get("live_visibility") || "public");
     draft.title = String(data.get("live_title") || "");
     draft.category = data.get("live_category") || "education";
     draft.subject = data.get("live_subject") || "general";
@@ -81,7 +89,7 @@ window.createInteractive = function (ctx) {
     if (!r) return `${back()}${errorHtml()}${ui.error ? "" : `<div class="card loading-card"><div class="spinner"></div><p>${tr("loading")}</p></div>`}`;
     const result = r.my_result;
     return `<div class="live-room-toolbar"><button class="back" data-live-leave>${icon("back")}${tr("liveLeave")}</button><button class="icon-button" data-live-share aria-label="${tr("liveShare")}">${icon("share")}</button></div>${errorHtml()}<div class="live-room-meta"><span class="live-count"><i class="live-dot"></i>${r.online_count} ${tr("liveOnline")}</span><span class="tag">${kindLabel(r.kind)}</span></div><h1 class="live-room-title">${esc(r.title)}</h1>
-      ${r.status === "active" ? `<section class="card live-playing"><div class="live-question-meta"><span>${tr("liveQuestion")} ${r.question_index + 1} / ${r.question_count}</span><span class="live-clock" data-live-countdown>—</span></div><div class="live-progress"><span style="width:${100 * (r.question_index + 1) / r.question_count}%"></span></div><h2>${esc(r.question.text)}</h2>${r.question.has_image ? `<img class="live-question-image" data-live-image alt="${tr("question")}" hidden>` : ""}<div class="live-options">${r.question.options.map((o, i) => `<button class="live-option ${r.selected === i ? "chosen" : ""}" data-live-answer="${i}" ${r.selected !== null || ui.answering ? "disabled" : ""}><span>${"ABCD"[i]}</span><b>${esc(o)}</b>${r.selected === i ? icon("check") : ""}</button>`).join("")}</div><p class="live-answer-hint" role="status">${tr(r.selected !== null ? "liveAnswerAccepted" : "liveChooseAnswer")}</p></section>` : `<section class="card live-result"><div class="success-symbol">${icon(r.kind === "affinity" ? "heart" : "check")}</div><h2>${tr(r.status === "stopped" ? "liveStopped" : "liveFinished")}</h2>${r.reason === "idle" ? `<p class="muted">${tr("liveIdleReason")}</p>` : ""}<span>${tr(r.kind === "affinity" ? "liveAffinityResult" : "liveResult")}</span><strong class="live-percent">${result.percent}%</strong><p>${tr("liveAnswered")}: ${result.answered} / ${r.question_count}</p>${r.kind === "affinity" ? `<p class="muted">${tr("liveAffinityHint")}</p>` : ""}${!result.complete ? `<span class="tag">${tr("livePartial")}</span>` : ""}<button class="primary" data-live-start="${r.quiz_id}">${icon("plus")}${tr("liveRestart")}</button></section>`}
+      ${r.status === "active" ? `<section class="card live-playing"><div class="live-question-meta"><span>${tr("liveQuestion")} ${r.question_index + 1} / ${r.question_count}</span><span class="live-clock" data-live-countdown>—</span></div><div class="live-progress"><span style="width:${100 * (r.question_index + 1) / r.question_count}%"></span></div><h2>${esc(r.question.text)}</h2>${r.question.has_image ? `<img class="live-question-image" data-live-image alt="${tr("question")}" hidden>` : ""}<div class="live-options">${r.question.options.map((o, i) => `<button class="live-option ${r.selected === i ? "chosen" : ""}" data-live-answer="${i}" ${r.selected !== null || ui.answering ? "disabled" : ""}><span>${"ABCD"[i]}</span><b>${esc(o)}</b>${r.selected === i ? icon("check") : ""}</button>`).join("")}</div><p class="live-answer-hint" role="status">${tr(r.selected !== null ? "liveAnswerAccepted" : "liveChooseAnswer")}</p></section>` : `<section class="card live-result"><div class="success-symbol">${icon(r.kind === "affinity" ? "heart" : "check")}</div><h2>${tr(r.status === "stopped" ? "liveStopped" : "liveFinished")}</h2>${["idle", "deleted"].includes(r.reason) ? `<p class="muted">${tr(r.reason === "deleted" ? "publishedRemovedReason" : "liveIdleReason")}</p>` : ""}<span>${tr(r.kind === "affinity" ? "liveAffinityResult" : "liveResult")}</span><strong class="live-percent">${result.percent}%</strong><p>${tr("liveAnswered")}: ${result.answered} / ${r.question_count}</p>${r.kind === "affinity" ? `<p class="muted">${tr("liveAffinityHint")}</p>` : ""}${!result.complete ? `<span class="tag">${tr("livePartial")}</span>` : ""}${r.can_restart ? `<button class="primary" data-live-start="${r.quiz_id}">${icon("plus")}${tr("liveRestart")}</button>` : ""}</section>`}
       <div class="split-actions"><button class="secondary" data-live-share>${icon("share")}${tr("liveShare")}</button><button class="secondary" data-live-copy>${icon("copy")}${tr("liveCopy")}</button></div>
       <section class="card"><div class="card-head"><span class="small-icon">${icon("team")}</span><h2>${tr("liveParticipants")}</h2><span class="tag">${r.member_count}</span></div>${r.players.map((p, n) => `<div class="live-rank"><span class="live-rank-number">${n + 1}</span>${person(p)}<div><strong>${esc(p.name)}${p.is_me ? " · ✓" : ""}</strong><small>${p.answered} ${tr("liveAnswered").toLowerCase()}${p.online ? ` · ${tr("liveOnline")}` : ""}</small></div>${r.kind === "knowledge" ? `<span class="live-rank-plays"><b>${p.score}</b><small>${tr("liveScore")}</small></span>` : ""}</div>`).join("")}</section><aside class="tip">${icon("bulb")}<p>${tr("liveRules")}</p></aside>`;
   }
@@ -107,6 +115,12 @@ window.createInteractive = function (ctx) {
   async function load(route) {
     if (!ctx.authorized()) return;
     const epoch = ui.epoch;
+    if (route === "published") {
+      try { const data = await api("interactive/quizzes/mine"); if (epoch === ui.epoch) { ui.own = data.quizzes; ui.ownNext = data.next; } }
+      catch (e) { if (epoch === ui.epoch) ui.error = e.code; }
+      if (epoch === ui.epoch) paint();
+      return;
+    }
     if (route === "interactive") await refreshLobby(epoch);
     if (route === "interactive-create") {
       try { ui.saved = (await api("quizzes")).quizzes; }
@@ -125,7 +139,7 @@ window.createInteractive = function (ctx) {
       const result = await api(`interactive?category=${ui.category}&subject=${ui.subject}`);
       if (epoch !== ui.epoch || ctx.route() !== "interactive") return;
       ui.lobby = result; ui.error = ""; paint();
-    } catch (e) { if (epoch !== ui.epoch) return; ui.error = e.code; paint(); }
+    } catch (e) { if (epoch !== ui.epoch) return; ui.error = e.code; paint(); if (ctx.isAuthError(e.code)) return; }
     if (epoch === ui.epoch && ctx.route() === "interactive" && !document.hidden) refreshTimer = setTimeout(() => refreshLobby(epoch), 8000);
   }
 
@@ -136,7 +150,7 @@ window.createInteractive = function (ctx) {
       if (epoch !== ui.epoch || ctx.route() !== "interactive-room") return;
       ui.room = result; ui.clockOffset = Date.now() / 1000 - result.server_time; ui.error = ""; paint();
       if (result.status !== "active") return;
-    } catch (e) { if (epoch !== ui.epoch) return; ui.error = e.code; paint(); if (["unauthorized", "not_found", "join_room_first"].includes(e.code)) return; }
+    } catch (e) { if (epoch !== ui.epoch) return; ui.error = e.code; paint(); if (ctx.isAuthError(e.code) || ["not_found", "join_room_first"].includes(e.code)) return; }
     if (epoch === ui.epoch && ctx.route() === "interactive-room" && !document.hidden) refreshTimer = setTimeout(() => refreshRoom(epoch), 2000);
   }
 
@@ -178,6 +192,22 @@ window.createInteractive = function (ctx) {
   }
 
   async function handleClick(button) {
+    if (button.dataset.liveDelete) { ui.confirmDelete = button.dataset.liveDelete; paint(); return true; }
+    if (button.hasAttribute("data-live-delete-cancel")) { ui.confirmDelete = ""; paint(); return true; }
+    if (button.dataset.liveDeleteConfirm) {
+      if (ui.removing) return true;
+      const id = button.dataset.liveDeleteConfirm; ui.removing = true; paint();
+      try { await api(`interactive/quizzes/${id}`, { method: "DELETE" }); ui.confirmDelete = ""; await load("published"); toast(tr("publishedRemoved")); }
+      catch (e) { ui.error = e.code; toast(e.message); }
+      finally { ui.removing = false; paint(); }
+      return true;
+    }
+    if (button.hasAttribute("data-live-own-more")) {
+      button.disabled = true;
+      try { const data = await api(`interactive/quizzes/mine?before=${encodeURIComponent(ui.ownNext)}`); ui.own.push(...data.quizzes); ui.ownNext = data.next; paint(); }
+      catch (e) { toast(e.message); button.disabled = false; }
+      return true;
+    }
     if (button.hasAttribute("data-live-category") || button.hasAttribute("data-live-subject")) {
       if (button.dataset.liveCategory) { ui.category = button.dataset.liveCategory; ui.subject = "all"; }
       else ui.subject = button.dataset.liveSubject;
@@ -252,10 +282,16 @@ window.createInteractive = function (ctx) {
     if (ui.source === "saved") { if (!ui.sourceId) return; data.source_quiz_id = Number(ui.sourceId); delete data.questions; }
     ui.busy = true; ui.error = ""; paint();
     try {
-      await api("interactive/quizzes", { method: "POST", body: data });
+      const published = await api("interactive/quizzes", { method: "POST", body: data });
       ui.category = data.category; ui.subject = "all"; ui.tab = "quizzes"; ui.lobby = null;
       ctx.storage.remove(`interactive-draft:${ctx.userKey()}`); ui.draft = null; ui.source = "new"; ui.sourceId = "";
-      await ctx.navigate("interactive"); toast(tr("livePublished"));
+      if (data.visibility === "private") {
+        try {
+          const room = await api("interactive/rooms", { method: "POST", body: { quiz_id: published.quiz_id } });
+          await openRoom(room.room_id);
+        } catch (error) { await ctx.navigate("published"); throw error; }
+      } else await ctx.navigate("interactive");
+      toast(tr("livePublished"));
     } catch (e) { ui.error = e.code; toast(e.message); }
     finally { ui.busy = false; paint(); }
   }
@@ -265,5 +301,5 @@ window.createInteractive = function (ctx) {
     if (document.hidden) stopTimers(); else load(ctx.route());
   });
   const handles = button => button.hasAttribute("data-publish-existing") || [...button.attributes].some(a => a.name.startsWith("data-live-"));
-  return { routes, hubPage, createPage, roomPage, capture, onNavigate, load, afterRender, handles, handleClick, change, submit, openRoom };
+  return { routes, hubPage, createPage, roomPage, ownPage, capture, onNavigate, load, afterRender, handles, handleClick, change, submit, openRoom };
 };

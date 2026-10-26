@@ -52,6 +52,18 @@ async def publish(request):
 
 
 @endpoint
+async def own_quizzes(request):
+    data = await request.app[SERVICE].own_quizzes(request[USER]["id"], before=request.query.get("before"))
+    return web.json_response(data)
+
+
+@endpoint
+async def remove_quiz(request):
+    await request.app[SERVICE].remove_quiz(request[USER]["id"], request.match_info["id"])
+    return web.json_response({"ok": True})
+
+
+@endpoint
 async def create_room(request):
     data = await read_json(request)
     quiz_id = data.get("quiz_id")
@@ -118,6 +130,8 @@ def setup_interactive(app):
     app.cleanup_ctx.append(lifecycle)
     app.router.add_get("/api/interactive", lobby)
     app.router.add_post("/api/interactive/quizzes", publish)
+    app.router.add_get("/api/interactive/quizzes/mine", own_quizzes)
+    app.router.add_delete("/api/interactive/quizzes/{id}", remove_quiz)
     app.router.add_post("/api/interactive/rooms", create_room)
     app.router.add_post("/api/interactive/rooms/{id}/join", join)
     app.router.add_post("/api/interactive/rooms/{id}/leave", leave)

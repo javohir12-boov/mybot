@@ -21,7 +21,7 @@ class SupportService:
         self._sent = {}
         self._pending = set()
 
-    async def send(self, bot, user, message, *, source):
+    async def send(self, bot, user, message, *, source, persist=False):
         if not isinstance(message, str) or not 1 <= len(message.strip()) <= MAX_MESSAGE_LENGTH:
             raise SupportError("invalid_support_message")
         user_id = user["id"]
@@ -45,13 +45,16 @@ class SupportService:
         self._pending.add(user_id)
         delivered = 0
         try:
+            if persist:
+                from services.support_inbox import inbox
+                await inbox.append_user(user_id, message)
             for admin_id in admins:
                 try:
                     await bot.send_message(admin_id, text, parse_mode="HTML", disable_web_page_preview=True)
                     delivered += 1
                 except Exception as exc:
                     logging.warning("Support delivery to admin %s failed: %s", admin_id, type(exc).__name__)
-            if not delivered:
+            if not delivered and not persist:
                 raise SupportError("support_unavailable", 503)
             self._sent[user_id] = time.monotonic()
         finally:

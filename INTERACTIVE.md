@@ -25,6 +25,12 @@ Testni qisman ishlagan foydalanuvchiga natija **Qisman natija** deb ko‘rsatila
 
 Test 1–50 savoldan iborat bo‘ladi. Har savolga 4 ta javob; vaqt 10–120 soniya. E’lon qilingan savollar alohida nusxa sifatida saqlanadi, shaxsiy testni keyinchalik tahrirlash boshlangan xonadagi savollarni almashtirmaydi.
 
+## Maxfiylik va olib tashlash
+
+E’lon qilishdagi **Kimlar ko‘rsin?** maydonida **Barchaga ochiq** yoki **Maxfiy** tanlanadi. Avval e’lon qilingan testlar ochiq bo‘lib qoladi. Ochiq testlar va xonalari umumiy katalogda ko‘rinadi. Maxfiy testlar, xonalari va yakunlashlari katalog yoki mualliflar reytingiga kiritilmaydi. Maxfiy xona faqat xona havolasini olgan va Telegram orqali kirgan foydalanuvchilarga ochiladi; havolani keyin boshqalarga ulashish ham kirish huquqini beradi. Maxfiy testdan yangi xonani faqat muallif ochadi.
+
+**Profil → E’lon qilgan testlarim** orqali muallif o‘zining ochiq va maxfiy testlarini ko‘radi. **Ochilgan xonaga qaytish** mavjud xonaga qaytaradi; **Birga boshlash** yangi xona ochadi. **Olib tashlash** va tasdiqlash testni katalogdan, profil ro‘yxatidan va reytingdan chiqaradi. Shu testga bog‘liq barcha faol xonalar, hatto ularni boshqa odam ochgan bo‘lsa ham, to‘xtaydi. Yangi qatnashchi qo‘shila olmaydi, savollarga javob berish va yangi xona ochish yopiladi. Botdagi shaxsiy asl test o‘chmaydi. Olib tashlangan e’lon va oldingi natijalar bazada tarix sifatida saqlanadi.
+
 ## Faol foydalanuvchilar va mualliflar reytingi
 
 **Hozir faol** blokida shu interaktiv bo‘limda bo‘lgan foydalanuvchilar ko‘rinadi. Ism va ilovadagi username profildan olinadi. Telegram foydalanuvchi ID lari ommaviy ro‘yxatlarda berilmaydi.

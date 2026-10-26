@@ -1,4 +1,5 @@
 ﻿import os
+import logging
 from pathlib import Path
 from typing import Any, Dict
 
@@ -10,6 +11,7 @@ def _load_dotenv(dotenv_path: Path) -> None:
     # Do not override environment variables already set outside of the file,
     # but within the .env file let later lines override earlier ones (last wins).
     preexisting = set(os.environ.keys())
+    loaded_values = {}
     text = dotenv_path.read_text(encoding="utf-8")
     for raw in text.splitlines():
         line = raw.strip()
@@ -33,6 +35,9 @@ def _load_dotenv(dotenv_path: Path) -> None:
             existing = str(os.environ.get(key, "") or "")
             if existing.strip():
                 continue
+        if key == "BOT_TOKEN" and key in loaded_values and loaded_values[key] != val:
+            logging.getLogger(__name__).warning(".env contains different BOT_TOKEN values. The last definition is used; keep one token matching the bot that opens the Mini App.")
+        loaded_values[key] = val
         os.environ[key] = val
 
 _ROOT = Path(__file__).parent
